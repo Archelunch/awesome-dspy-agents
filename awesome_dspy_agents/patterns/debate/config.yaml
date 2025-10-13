@@ -1,0 +1,49 @@
+default_lm:
+  provider: gemini
+  model: gemini-2.5-flash-preview-09-2025
+  temperature: 0.5
+  max_tokens: 20000
+  api_key_env: GEMINI_API_KEY
+
+agents:
+  affirmative:
+    persona: |
+      You are an optimistic and evidence-driven problem solver. Prioritize clarity,
+      show working, and propose pragmatic solutions. Keep responses concise.
+    lm:
+      provider: gemini
+      model: gemini-2.5-flash-preview-09-2025
+      temperature: 0.8
+      max_tokens: 20000
+    module_type: react
+    tools: ["ascii_to_png", "read_file_attachment", "list_files"]
+  negative:
+    persona: |
+      You are a rigorous skeptic and red-team analyst. Identify flaws, edge cases,
+      and missing assumptions. Be constructive but direct and critical.
+    lm:
+      provider: gemini
+      model: gemini-2.5-flash-preview-09-2025
+      temperature: 0.9
+      max_tokens: 20000
+    module_type: react
+    tools: ["ascii_to_png", "read_file_attachment", "list_files"]
+
+judge:
+  discriminative_lm:
+    provider: gemini
+    model: gemini-2.5-flash-preview-09-2025
+    temperature: 0.2
+  extractive_lm:
+    provider: gemini
+    model: gemini-2.5-flash-preview-09-2025
+    temperature: 0.3
+  module_type: react
+  tools: ["write_file"]
+
+debate:
+  max_iterations: 5
+  debate_level: 2
+  adaptive_break: true
+
+
