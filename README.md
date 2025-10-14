@@ -6,9 +6,55 @@
 
 A collection of multi-agent systems implemented with the [DSPy](https://github.com/stanfordnlp/dspy) framework.
 
+## Installation
+
+### Prerequisites
+
+- Python 3.12 or higher
+- Git
+
+### Setup
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/Archelunch/awesome-dspy-agents
+   cd awesome-dspy-agents
+   ```
+
+2. **Install Poetry (if not already installed):**
+   ```bash
+   pip install poetry
+   ```
+
+3. **Install dependencies:**
+   ```bash
+   poetry install
+   ```
+
+4. **Set up environment variables:**
+   Set your API keys for the language model providers you want to use:
+   ```bash
+   export GEMINI_API_KEY=your_gemini_api_key_here
+   export OPENAI_API_KEY=your_openai_api_key_here
+   # Add other provider keys as needed
+   ```
+
+5. **Verify installation:**
+   ```bash
+   poetry run dspy-agents --help
+   ```
+
+6. **Optional: Install shell completion:**
+   ```bash
+   poetry run dspy-agents --install-completion
+   ```
+
 ## Table of Contents
 
 - [Awesome DSPy Agents](#awesome-dspy-agents)
+  - [Installation](#installation)
+    - [Prerequisites](#prerequisites)
+    - [Setup](#setup)
   - [Table of Contents](#table-of-contents)
   - [Available Patterns](#available-patterns)
       - [Debates](#debates)
@@ -349,4 +395,5 @@ Guidelines:
 - [ ] Batch runs (`run-batch --topics file.txt --concurrency N`).
 - [ ] Add tests
 - [ ] More examples
+- [ ] More tools
 - [ ] Improve agents communication 
