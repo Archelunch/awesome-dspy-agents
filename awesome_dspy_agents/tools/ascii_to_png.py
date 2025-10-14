@@ -9,7 +9,8 @@ It uses PIL (Pillow) to render text with monospace fonts and save as image files
 
 import os
 from pathlib import Path
-from typing import Tuple, Optional, Union
+from typing import Optional, Tuple, Union
+
 from PIL import Image, ImageDraw, ImageFont  # type: ignore
 
 

@@ -1,23 +1,18 @@
-import dspy  # type: ignore
-from typing import Optional, Callable, Dict, Any, List
-from awesome_dspy_agents.logging_setup import get_logger
-from .signatures import (
-    AffirmativeDebater,
-    NegativeDebater,
-    JudgeDiscriminative,
-    JudgeExtractive,
-)
-from awesome_dspy_agents.tools.registry import (
-    registry,
-    set_current_agent,
-    reset_current_agent,
-    set_current_iteration,
-    reset_current_iteration,
-)
 from pathlib import Path
-from awesome_dspy_agents.patterns.interface import AgentPattern
-from awesome_dspy_agents.config import AppConfig, load_config, build_lm
+from typing import Any, Callable, Dict, List, Optional
 
+import dspy  # type: ignore
+
+from awesome_dspy_agents.config import AppConfig, build_lm, load_config
+from awesome_dspy_agents.logging_setup import get_logger
+from awesome_dspy_agents.patterns.interface import AgentPattern
+from awesome_dspy_agents.tools.registry import (registry, reset_current_agent,
+                                                reset_current_iteration,
+                                                set_current_agent,
+                                                set_current_iteration)
+
+from .signatures import (AffirmativeDebater, JudgeDiscriminative,
+                         JudgeExtractive, NegativeDebater)
 
 llm_logger = get_logger("mad.llm", "llm_calls.log", max_bytes=2_000_000, backup_count=3)
 
@@ -357,7 +352,9 @@ class MADFramework(dspy.Module):
                     # Callback after judge evaluation
                     if self.on_iteration is not None:
                         try:
-                            self.on_iteration(iteration, exchange, self.format_history())
+                            self.on_iteration(
+                                iteration, exchange, self.format_history()
+                            )
                         except Exception:
                             pass
 
@@ -512,7 +509,9 @@ class DebatePattern(AgentPattern):
             judge_module_type=cfg.judge.module_type,
             affirmative_tools=(aff_cfg.tools if aff_cfg else []),
             negative_tools=(neg_cfg.tools if neg_cfg else []),
-            judge_tool_names=(cfg.judge.tools if getattr(cfg.judge, "tools", None) is not None else []),
+            judge_tool_names=(
+                cfg.judge.tools if getattr(cfg.judge, "tools", None) is not None else []
+            ),
         )
 
         # attach iteration callback

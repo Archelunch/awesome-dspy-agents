@@ -1,10 +1,9 @@
 # pyright: reportMissingTypeStubs=false
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import dspy
-from pydantic import BaseModel, Field, ConfigDict, ValidationError
-from typing import Literal, List
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 class LMSettings(BaseModel):
@@ -65,6 +64,13 @@ class DebateConfig(BaseModel):
     adaptive_break: bool = True
 
 
+class AbsConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    max_iterations: int = Field(default=2, ge=1)
+    early_exit: bool = True
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -72,6 +78,7 @@ class AppConfig(BaseModel):
     agents: Dict[str, AgentConfig] = Field(default_factory=dict)
     judge: JudgeConfig = Field(default_factory=JudgeConfig)
     debate: DebateConfig = Field(default_factory=DebateConfig)
+    abs: AbsConfig = Field(default_factory=AbsConfig)
 
 
 def build_lm(settings: LMSettings) -> dspy.LM:

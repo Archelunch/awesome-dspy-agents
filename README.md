@@ -1,14 +1,65 @@
 # Awesome DSPy Agents
+[![Python Version](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![Poetry](https://img.shields.io/badge/poetry-1.8.2+-blue.svg)](https://python-poetry.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-orange?logo=buy-me-a-coffee)](https://buymeacoffee.com/mike_pavlukhin)
 
 A collection of multi-agent systems implemented with the [DSPy](https://github.com/stanfordnlp/dspy) framework.
 
+## Table of Contents
+
+- [Awesome DSPy Agents](#awesome-dspy-agents)
+  - [Table of Contents](#table-of-contents)
+  - [Available Patterns](#available-patterns)
+      - [Debates](#debates)
+      - [Addition by Subtraction](#addition-by-subtraction)
+    - [Available Tools](#available-tools)
+  - [Using the CLI](#using-the-cli)
+  - [Configuration](#configuration)
+  - [Examples](#examples)
+    - [Addition-by-Subtraction Pattern](#addition-by-subtraction-pattern)
+  - [Development Guide](#development-guide)
+    - [Project layout](#project-layout)
+    - [Common practices](#common-practices)
+    - [Adding a new pattern](#adding-a-new-pattern)
+    - [Adding tools to the global registry](#adding-tools-to-the-global-registry)
+    - [Configuration](#configuration-1)
+    - [Observability \& logs](#observability--logs)
+    - [Roadmap ideas](#roadmap-ideas)
+
 ## Available Patterns
 
-This section will describe the implemented agent patterns.
+These are the built-in patterns. Use the CLI to explore and run them.
 
 | Pattern | Description | Strengths | Weaknesses |
 | --- | --- | --- | --- |
-| | | | |
+| debate | Multi‑Agent Debate with a Judge. Two agents argue iteratively; an optional judge evaluates progress and extracts the final answer. | Strong adversarial reasoning; adaptive early stop; ReAct tool support. | Higher token usage; needs careful judge configuration. |
+| addition_by_subtraction | Addition‑by‑Subtraction collaboration. Addition expands details; Subtraction removes redundancy and feeds back; early exit when stable. | Concise refined answers; low iteration count by default (M≤2); ReAct tool support. | Can miss alternative directions; relies on good subtraction feedback. |
+
+Related work:
+#### Debates 
+Encouraging Divergent Thinking in Large Language Models through Multi-Agent Debate: https://arxiv.org/abs/2305.19118
+
+#### Addition by Subtraction
+(Perhaps) Beyond Human Translation: Harnessing Multi-Agent Collaboration for Translating Ultra-Long Literary Texts: https://arxiv.org/abs/2305.19118
+
+### Available Tools
+
+Tools are available to ReAct modules across patterns via a shared registry. List tools and inspect details:
+
+```bash
+poetry run dspy-agents tools
+poetry run dspy-agents tools --describe read_file_attachment
+```
+
+- math_eval: Evaluate a simple Python math expression safely; returns string.
+- word_count: Count words in text; returns string number.
+- ascii_to_png: Render ASCII text into a PNG (`dspy.Image`) for visual reasoning.
+- list_files: List absolute file paths under a directory (sandboxed).
+- read_file_attachment: Return an `Attachments` object for a local file (sandboxed).
+- write_file: Write text to a local file path; returns absolute path (sandboxed).
+
+Sandboxing: File tools are restricted to allowed directories. Use `--allow-path /abs/dir` to opt‑in per run (can repeat).
 
 ## Using the CLI
 
@@ -35,6 +86,7 @@ poetry run dspy-agents describe debate
 poetry run dspy-agents configs debate
 poetry run dspy-agents tools
 poetry run dspy-agents tools --pattern debate
+poetry run dspy-agents tools --describe ascii_to_png
 ```
 
 Run patterns:
@@ -46,18 +98,151 @@ poetry run dspy-agents run debate "Is RLHF always beneficial?"
 # custom config
 poetry run dspy-agents run debate -c awesome_dspy_agents/patterns/debate/config.yaml "Debate topic"
 
-# override nested config values at runtime
-poetry run dspy-agents run debate "Topic" --set debate.max_iterations=3 --set debate.debate_level=2
+# override nested config values at runtime (typed casting: bool/int/float)
+poetry run dspy-agents run debate "Topic" --set debate.max_iterations=3 --set debate.debate_level=2 --set judge.module_type=react
 
 # interactive guided run with arrow-key selection
 poetry run dspy-agents interactive
 ```
 
-During runs you will see per-iteration exchanges and judge evaluations, followed by a final decision.
+JSON output and session save/replay:
 
-## Contributing
+```bash
+# Emit machine-readable JSON and save the full session
+poetry run dspy-agents run debate "Is RLHF always beneficial?" --json --save runs/rlhf.json
 
-...
+# Replay a saved session locally without model calls
+poetry run dspy-agents replay runs/rlhf.json
+```
+
+Compare patterns on the same topic:
+
+```bash
+poetry run dspy-agents compare debate addition_by_subtraction "What is chain-of-thought?" --metric jaccard
+```
+
+Version and sandbox:
+
+```bash
+poetry run dspy-agents version
+poetry run dspy-agents run addition_by_subtraction "Summarize file" --allow-path . --set abs.max_iterations=2
+```
+
+During runs you will see per-iteration exchanges (debate or addition/subtraction), optional judge evaluations, and a final decision. Tool usage is summarized under each iteration.
+
+## Configuration
+
+Configuration is layered and typed:
+
+1. Pattern default config (e.g., `patterns/debate/config.yaml`).
+2. User-provided file via `-c/--config`.
+3. CLI overrides via `--set a.b=value` (auto‑casts `true/false`, integers, and floats).
+4. Environment variable expansion inside YAML values: `${OPENAI_API_KEY}`.
+
+Minimal examples:
+
+```yaml
+# debate/config.yaml (excerpt)
+default_lm:
+  provider: gemini
+  model: gemini-2.5-flash-preview-09-2025
+  api_key_env: GEMINI_API_KEY
+
+agents:
+  affirmative:
+    persona: "Optimistic, evidence-driven."
+    module_type: react
+    tools: ["ascii_to_png", "read_file_attachment", "list_files"]
+  negative:
+    persona: "Rigorous skeptic."
+    module_type: react
+    tools: ["ascii_to_png", "read_file_attachment", "list_files"]
+
+judge:
+  module_type: react
+  tools: ["write_file"]
+
+debate:
+  max_iterations: 5
+  debate_level: 2
+  adaptive_break: true
+```
+
+```yaml
+# addition_by_subtraction/config.yaml (excerpt)
+default_lm:
+  provider: gemini
+  model: gemini-2.5-flash-preview-09-2025
+  api_key_env: GEMINI_API_KEY
+
+agents:
+  addition:
+    persona: "Expand relevant information and synthesize details."
+    module_type: react
+    tools: ["ascii_to_png", "read_file_attachment", "list_files", "math_eval", "word_count"]
+  subtraction:
+    persona: "Remove redundancy and provide clear feedback."
+    module_type: react
+    tools: ["ascii_to_png", "read_file_attachment", "list_files", "math_eval", "word_count"]
+
+abs:
+  max_iterations: 2
+  early_exit: true
+```
+
+Tips:
+
+- Point to a custom config: `-c path/to/config.yaml`.
+- Override nested values at runtime (typed): `--set debate.max_iterations=3 --set judge.module_type=react`.
+- Per‑agent LM: set `agents.<name>.lm` block with `provider/model/api_base/api_key(_env)`.
+- File tools are sandboxed; add `--allow-path /abs/dir` to enable local file access.
+
+## Examples
+
+Run Debate with a custom judge and fewer iterations:
+
+```bash
+poetry run dspy-agents run debate "When to use CoT?" \
+  --set debate.max_iterations=3 \
+  --set judge.module_type=react
+```
+
+Run ABS with early exit disabled and save JSON:
+
+```bash
+poetry run dspy-agents run addition_by_subtraction "Summarize the paper" \
+  --set abs.early_exit=false --json --save runs/abs.json
+```
+
+Use a local file during a run (sandboxed):
+
+```bash
+poetry run dspy-agents run addition_by_subtraction "Summarize the attached doc" \
+  --allow-path "$PWD" \
+  --set agents.addition.tools="[read_file_attachment]"
+```
+
+### Addition-by-Subtraction Pattern
+
+This collaboration uses two agents only: Addition (expands and aggregates relevant details) and Subtraction (removes redundancy and provides feedback). It iterates up to `abs.max_iterations` with an early-exit when no further revision is needed.
+
+- Default config: `awesome_dspy_agents/patterns/addition_by_subtraction/config.yaml`
+- Supports tools via ReAct (same registry as debate). Tools used are rendered in TUI under each iteration.
+
+Examples:
+
+```bash
+poetry run dspy-agents describe addition_by_subtraction
+poetry run dspy-agents configs addition_by_subtraction
+poetry run dspy-agents run addition_by_subtraction "Summarize the key ideas from the attached document"
+# Override ABS parameters
+poetry run dspy-agents run addition_by_subtraction "Instruction" --set abs.max_iterations=2 --set abs.early_exit=true
+```
+
+TUI displays two columns: Addition and Subtraction, plus a Feedback panel each iteration. Tool usage events are summarized below the panels.
+
+Note: Early exit happens when subsequent additions stabilize. Default maximum iterations M=2 (configurable via `abs.max_iterations`).
+
 
 ## Development Guide
 
@@ -76,6 +261,10 @@ awesome_dspy_agents/
     interface.py               # AgentPattern protocol and discovery
     debate/
       pattern.py               # DebatePattern + MADFramework
+      signatures.py            # DSPy signatures
+      config.yaml              # Default config
+    addition_by_subtraction/
+      pattern.py               # Addition-by-Subtraction Pattern + ABSFramework
       signatures.py            # DSPy signatures
       config.yaml              # Default config
 ```
@@ -137,23 +326,27 @@ agents:
 ```
 
 Guidelines:
-- Keep tool I/O small; return primitives or `dspy.Image` for images.
-- Use the registry’s logging; avoid network I/O unless essential.
+- Keep tool I/O small; return primitives, `dspy.Image` for images or `Attachments` for other files.
 
-### Configuration best practices
+
+### Configuration
 - Layering: default pattern config -> user-provided file (`-c`) -> CLI overrides (`--set a.b=val`).
 - Use env var placeholders in YAML (`${GEMINI_API_KEY}`) to avoid committing secrets.
-- For local models (Ollama), set `api_base` in the config and leave `api_key` empty.
-
-### Testing patterns and CLI
-- Add snapshot tests for CLI output for stable commands (`list`, `describe`).
-- Add integration tests per pattern to ensure end-to-end outputs are structured.
-- Prefer deterministic seeds or fixed temperatures for tests.
+- For local models (Ollama, vLLM), set `api_base` and `api_key` in the config.
 
 ### Observability & logs
 - LLM calls are logged under `mad.llm` rotating files in `patterns/logs/`.
 - Tool calls are logged under `mad.tools` rotating files in the same directory.
-
+  
 ### Roadmap ideas
-- Optional token streaming via `dspy.streamify` with a `--stream` flag.
-- Built-in optimization scripts (MIPRO/GEPA) surfaced in `scripts` command.
+- [x] Add Addition-by-Subtraction pattern
+- [x] Add tools
+- [ ] Add MAPS pattern
+- [ ] Optional token streaming via `dspy.streamify` with a `--stream` flag.
+- [ ] Built-in optimization scripts (MIPRO/GEPA) surfaced in `scripts` command.
+- [ ] Integration with MLFlow
+- [ ] Session profiles (token counts, latency) and `--profile` flag.
+- [ ] Batch runs (`run-batch --topics file.txt --concurrency N`).
+- [ ] Add tests
+- [ ] More examples
+- [ ] Improve agents communication 

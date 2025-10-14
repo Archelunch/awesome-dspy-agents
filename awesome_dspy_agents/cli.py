@@ -1,19 +1,21 @@
 # pyright: reportMissingTypeStubs=false
+import json
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional
 
-import dspy
-import typer
-from rich.console import Console
-from rich.markdown import Markdown
-from rich.panel import Panel
-from rich.table import Table
-import questionary
+import dspy  # type: ignore
+import questionary  # type: ignore
+import typer  # type: ignore
+from rich.console import Console  # type: ignore
+from rich.markdown import Markdown  # type: ignore
+from rich.panel import Panel  # type: ignore
+from rich.table import Table  # type: ignore
 
-from awesome_dspy_agents.patterns.interface import find_patterns
+from awesome_dspy_agents import __version__, tui
 from awesome_dspy_agents.config import AppConfig, build_lm
+from awesome_dspy_agents.patterns.interface import find_patterns
 from awesome_dspy_agents.tools.registry import registry
-
 
 # --- Setup ---
 
@@ -68,6 +70,138 @@ def _pattern_map():
 
 
 # --- CLI Commands ---
+
+
+@app.callback()
+def _setup(
+    allow_path: Optional[List[str]] = typer.Option(
+        None,
+        "--allow-path",
+        help="Allow file tools to access given absolute directories (repeatable)",
+    ),
+):
+    if allow_path:
+        registry.set_sandbox_roots(allow_path)
+
+
+def _coerce_value(s: str):
+    sl = s.lower()
+    if sl in ("true", "false"):
+        return sl == "true"
+    try:
+        if "." in s:
+            return float(s)
+        return int(s)
+    except ValueError:
+        return s
+
+
+def _parse_overrides(set: Optional[list[str]]) -> dict:
+    overrides: dict = {}
+    if not set:
+        return overrides
+    for kv in set:
+        if "=" not in kv:
+            continue
+        key, val = kv.split("=", 1)
+        cursor = overrides
+        parts = key.split(".")
+        for p in parts[:-1]:
+            cursor = cursor.setdefault(p, {})
+        cursor[parts[-1]] = _coerce_value(val)
+    return overrides
+
+
+def _execute_pattern(
+    pattern_name: str,
+    topic: str,
+    config_path: Path,
+    overrides: dict,
+    stream: bool,
+    json_output: bool,
+    save_path: Optional[Path],
+) -> Dict[str, Any]:
+    patterns = _pattern_map()
+    pat = patterns.get(pattern_name)
+    if not pat:
+        console.print(
+            f"[bold red]Error:[/bold red] Pattern '{pattern_name}' not found."
+        )
+        raise typer.Exit(code=1)
+
+    # Tool event capture for TUI
+    tool_events_by_iter: Dict[int, List[Dict[str, Any]]] = {}
+    printed_index_by_iter: Dict[int, int] = {}
+
+    def _tool_listener(event: str, payload: Dict[str, Any]) -> None:
+        try:
+            iteration = int(payload.get("iteration", 0))
+        except Exception:
+            iteration = 0
+        if iteration <= 0:
+            return
+        tool_events_by_iter.setdefault(iteration, []).append(
+            {
+                "event": event,
+                **payload,
+            }
+        )
+
+    def _on_iteration(iteration: int, exchange: dict, history: str) -> None:
+        if not json_output:
+            tui.render_iteration(iteration, exchange)
+            events = tool_events_by_iter.get(iteration, [])
+            start_idx = printed_index_by_iter.get(iteration, 0)
+            printed_index_by_iter[iteration] = tui.render_tool_events(
+                iteration, events, start_idx
+            )
+
+    if not json_output:
+        tui.render_header(pattern_name, topic)
+
+    registry.add_listener(_tool_listener)
+    try:
+        result = pat.run(
+            topic=topic,
+            config_path=config_path,
+            overrides=overrides,
+            on_iteration=_on_iteration,
+        )
+    except Exception as e:
+        console.print(f"[bold red]Error during run:[/bold red] {e}")
+        raise typer.Exit(code=1)
+    finally:
+        registry.remove_listener(_tool_listener)
+
+    record = {
+        "schema": 1,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "version": __version__,
+        "pattern": pattern_name,
+        "topic": topic,
+        "config_path": str(config_path),
+        "overrides": overrides,
+        "tool_events_by_iter": tool_events_by_iter,
+        "result": result,
+    }
+
+    if save_path is not None:
+        try:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            save_path.write_text(
+                json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as e:
+            console.print(f"[yellow]Warning:[/yellow] Failed to save session: {e}")
+
+    if json_output:
+        console.print_json(data=record)
+    else:
+        tui.render_final(
+            result.get("final_answer", ""), result.get("justification", "")
+        )
+
+    return record
 
 
 @app.command("list")
@@ -149,6 +283,13 @@ def run(
     set: Optional[list[str]] = typer.Option(
         None, "--set", help="Override config values, e.g. debate.max_iterations=5"
     ),
+    stream: bool = typer.Option(False, "--stream", help="Stream tokens if supported"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit JSON record instead of TUI"
+    ),
+    save: Optional[Path] = typer.Option(
+        None, "--save", help="Save session to JSON file"
+    ),
 ):
     """Run a specific agent pattern."""
     patterns = _pattern_map()
@@ -179,120 +320,16 @@ def run(
     if not topic:
         topic = typer.prompt("Please enter the topic/task")
 
-    # Parse --set overrides into nested dict
-    overrides: dict = {}
-    if set:
-        for kv in set:
-            if "=" not in kv:
-                continue
-            key, val = kv.split("=", 1)
-            # build nested dict e.g. debate.max_iterations -> {debate: {max_iterations: val}}
-            cursor = overrides
-            parts = key.split(".")
-            for p in parts[:-1]:
-                cursor = cursor.setdefault(p, {})
-            cursor[parts[-1]] = val
-
-    console.print(
-        Panel.fit(
-            f"Running [bold cyan]{pattern_name}[/bold cyan] Pattern", style="bold blue"
-        )
-    )
-    console.print(Panel.fit(Markdown(f"**Topic:** {topic}")))
-
-    # Tool event capture for TUI
-    tool_events_by_iter: Dict[int, List[Dict[str, Any]]] = {}
-    printed_index_by_iter: Dict[int, int] = {}
-
-    def _tool_listener(event: str, payload: Dict[str, Any]) -> None:
-        try:
-            iteration = int(payload.get("iteration", 0))
-        except Exception:
-            iteration = 0
-        if iteration <= 0:
-            return
-        tool_events_by_iter.setdefault(iteration, []).append({
-            "event": event,
-            **payload,
-        })
-
-    def _on_iteration(iteration: int, exchange: dict, history: str) -> None:
-        # Print debate exchange or judge panel as before
-        if "judge_eval" not in exchange:
-            table = Table(show_header=True, header_style="bold magenta")
-            table.add_column("Iteration", justify="right", style="cyan", width=10)
-            table.add_column("Affirmative", style="green")
-            table.add_column("Negative", style="red")
-            table.add_row(
-                str(iteration),
-                exchange.get("affirmative", ""),
-                exchange.get("negative", ""),
-            )
-            console.print(table)
-        else:
-            console.print(
-                Panel.fit(
-                    exchange["judge_eval"],
-                    title=f"Judge @ {iteration}",
-                    border_style="yellow",
-                )
-            )
-
-        # Print any new tool events for this iteration
-        events = tool_events_by_iter.get(iteration, [])
-        start_idx = printed_index_by_iter.get(iteration, 0)
-        new_events = events[start_idx:]
-        if new_events:
-            t = Table(show_header=True, header_style="bold blue")
-            t.title = f"Tools used @ iteration {iteration} (+{len(new_events)})"
-            t.add_column("Agent", style="cyan")
-            t.add_column("Tool", style="magenta")
-            t.add_column("Event", style="yellow")
-            t.add_column("Details", style="green")
-            for ev in new_events:
-                agent = ev.get("agent", "unknown")
-                tool = ev.get("tool", "?")
-                evt = ev.get("event", "")
-                details = ""
-                if evt == "tool_call":
-                    details = ev.get("args_preview", "")
-                elif evt == "tool_result":
-                    rt = ev.get("result_type", "")
-                    sz = ev.get("size")
-                    details = f"{rt} size={sz}" if sz is not None else rt
-                elif evt == "tool_error":
-                    details = ev.get("error", "")
-                t.add_row(str(agent), str(tool), str(evt), str(details))
-            console.print(t)
-            printed_index_by_iter[iteration] = start_idx + len(new_events)
-
-    # Register listener and run
-    registry.add_listener(_tool_listener)
-    try:
-        result = pat.run(
-            topic=topic,
-            config_path=config_path,
-            overrides=overrides,
-            on_iteration=_on_iteration,
-        )
-    except Exception as e:
-        console.print(f"[bold red]Error during run:[/bold red] {e}")
-        raise typer.Exit(code=1)
-    finally:
-        registry.remove_listener(_tool_listener)
-
-    console.rule("Final Decision")
-    console.print(
-        Panel.fit(
-            result.get("justification", ""),
-            title="Justification",
-            border_style="magenta",
-        )
-    )
-    console.print(
-        Panel.fit(
-            result.get("final_answer", ""), title="Final Answer", border_style="green"
-        )
+    overrides = _parse_overrides(set)
+    assert topic is not None
+    _execute_pattern(
+        pattern_name=pattern_name,
+        topic=topic,
+        config_path=config_path,
+        overrides=overrides,
+        stream=stream,
+        json_output=json_output,
+        save_path=save,
     )
 
 
@@ -301,9 +338,26 @@ def tools(
     pattern_name: Optional[str] = typer.Option(
         None, "--pattern", help="Filter tools for a specific pattern"
     ),
+    describe: Optional[str] = typer.Option(
+        None, "--describe", help="Describe specific tool"
+    ),
 ):
     """List available tools (global or for a given pattern)."""
     console.print(Panel.fit("Available Tools", style="bold blue"))
+    if describe:
+        try:
+            fn = registry.get(describe)
+        except KeyError:
+            console.print(f"[bold red]Error:[/bold red] Unknown tool '{describe}'")
+            raise typer.Exit(code=1)
+        sig = getattr(fn, "__signature__", None)
+        doc = getattr(fn, "__doc__", None) or "(no docstring)"
+        console.print(
+            Panel.fit(str(sig), title=f"Signature: {describe}", border_style="magenta")
+        )
+        console.print(Panel.fit(doc.strip(), title="Docstring"))
+        return
+
     table = Table(show_header=True, header_style="bold magenta")
     table.add_column("Tool Name", style="cyan")
     table.add_column("Source", style="green")
@@ -423,98 +477,93 @@ def interactive():
         val = typer.prompt("New max_iterations", default="5")
         overrides.setdefault("debate", {})["max_iterations"] = val
 
-    console.print(
-        Panel.fit(
-            f"Running [bold cyan]{pattern_name}[/bold cyan] Pattern", style="bold blue"
-        )
+    _execute_pattern(
+        pattern_name=pattern_name,
+        topic=topic,
+        config_path=config_path,
+        overrides=overrides,
+        stream=False,
+        json_output=False,
+        save_path=None,
     )
-    console.print(Panel.fit(Markdown(f"**Topic:** {topic}")))
-    # Tool event capture for interactive TUI
-    tool_events_by_iter: Dict[int, List[Dict[str, Any]]] = {}
-    printed_index_by_iter: Dict[int, int] = {}
 
-    def _tool_listener(event: str, payload: Dict[str, Any]) -> None:
-        try:
-            iteration = int(payload.get("iteration", 0))
-        except Exception:
-            iteration = 0
-        if iteration <= 0:
-            return
-        tool_events_by_iter.setdefault(iteration, []).append({
-            "event": event,
-            **payload,
-        })
 
-    def _on_iteration(iteration: int, exchange: dict, history: str) -> None:
-        if "judge_eval" not in exchange:
-            table = Table(show_header=True, header_style="bold magenta")
-            table.add_column("Iteration", justify="right", style="cyan", width=10)
-            table.add_column("Affirmative", style="green")
-            table.add_column("Negative", style="red")
-            table.add_row(
-                str(iteration),
-                exchange.get("affirmative", ""),
-                exchange.get("negative", ""),
-            )
-            console.print(table)
-        else:
-            console.print(
-                Panel.fit(
-                    exchange["judge_eval"],
-                    title=f"Judge @ {iteration}",
-                    border_style="yellow",
-                )
-            )
-
-        events = tool_events_by_iter.get(iteration, [])
-        start_idx = printed_index_by_iter.get(iteration, 0)
-        new_events = events[start_idx:]
-        if new_events:
-            t = Table(show_header=True, header_style="bold blue")
-            t.title = f"Tools used @ iteration {iteration} (+{len(new_events)})"
-            t.add_column("Agent", style="cyan")
-            t.add_column("Tool", style="magenta")
-            t.add_column("Event", style="yellow")
-            t.add_column("Details", style="green")
-            for ev in new_events:
-                agent = ev.get("agent", "unknown")
-                tool = ev.get("tool", "?")
-                evt = ev.get("event", "")
-                details = ""
-                if evt == "tool_call":
-                    details = ev.get("args_preview", "")
-                elif evt == "tool_result":
-                    rt = ev.get("result_type", "")
-                    sz = ev.get("size")
-                    details = f"{rt} size={sz}" if sz is not None else rt
-                elif evt == "tool_error":
-                    details = ev.get("error", "")
-                t.add_row(str(agent), str(tool), str(evt), str(details))
-            console.print(t)
-            printed_index_by_iter[iteration] = start_idx + len(new_events)
-
-    registry.add_listener(_tool_listener)
+@app.command("replay")
+def replay(path: Path = typer.Argument(..., help="Path to saved session JSON")):
     try:
-        result = patterns[pattern_name].run(
-            topic=topic,
-            config_path=config_path,
-            overrides=overrides,
-            on_iteration=_on_iteration,
-        )
-    finally:
-        registry.remove_listener(_tool_listener)
-    console.rule("Final Decision")
-    console.print(
-        Panel.fit(
-            result.get("justification", ""),
-            title="Justification",
-            border_style="magenta",
-        )
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+    pattern_name = data.get("pattern", "?")
+    topic = data.get("topic", "")
+    tui.render_header(pattern_name, topic)
+    events_by_iter: Dict[int, List[Dict[str, Any]]] = {
+        int(k): v for k, v in (data.get("tool_events_by_iter", {}) or {}).items()
+    }
+    printed_index_by_iter: Dict[int, int] = {}
+    history = (
+        data.get("result", {}).get("history")
+        or data.get("result", {}).get("debate_history")
+        or []
     )
+    for i, exchange in enumerate(history, 1):
+        tui.render_iteration(i, exchange)
+        events = events_by_iter.get(i, [])
+        idx = printed_index_by_iter.get(i, 0)
+        printed_index_by_iter[i] = tui.render_tool_events(i, events, idx)
+    tui.render_final(
+        data.get("result", {}).get("final_answer", ""),
+        data.get("result", {}).get("justification", ""),
+    )
+
+
+@app.command("compare")
+def compare(
+    pattern_a: str = typer.Argument(..., help="First pattern"),
+    pattern_b: str = typer.Argument(..., help="Second pattern"),
+    topic: str = typer.Argument(..., help="Topic"),
+    config_a: Optional[Path] = typer.Option(None, "--config-a"),
+    config_b: Optional[Path] = typer.Option(None, "--config-b"),
+    metric: str = typer.Option("exact", "--metric", help="exact|len|jaccard"),
+):
+    patterns = _pattern_map()
+    cfg_a = config_a or patterns[pattern_a].default_config_path()
+    cfg_b = config_b or patterns[pattern_b].default_config_path()
+    rec_a = _execute_pattern(
+        pattern_name=pattern_a,
+        topic=topic,
+        config_path=cfg_a,
+        overrides={},
+        stream=False,
+        json_output=False,
+        save_path=None,
+    )
+    rec_b = _execute_pattern(
+        pattern_name=pattern_b,
+        topic=topic,
+        config_path=cfg_b,
+        overrides={},
+        stream=False,
+        json_output=False,
+        save_path=None,
+    )
+    a = (rec_a.get("result", {}).get("final_answer", "") or "").strip()
+    b = (rec_b.get("result", {}).get("final_answer", "") or "").strip()
+
+    t = Table(show_header=True, header_style="bold magenta")
+    t.add_column("Pattern", style="cyan")
+    t.add_column("Final Answer (truncated)", style="green")
+    t.add_row(pattern_a, (a[:120] + "…") if len(a) > 120 else a)
+    t.add_row(pattern_b, (b[:120] + "…") if len(b) > 120 else b)
+    console.print(t)
+
+
+@app.command("version")
+def version_cmd():
     console.print(
-        Panel.fit(
-            result.get("final_answer", ""), title="Final Answer", border_style="green"
-        )
+        Panel.fit(f"awesome-dspy-agents [bold cyan]{__version__}[/bold cyan]")
     )
 
 

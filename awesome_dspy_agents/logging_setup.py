@@ -1,14 +1,13 @@
 from __future__ import annotations
 
+import logging
 import os
 import sys
-import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
 import structlog  # type: ignore
-
 
 _CONFIGURED: bool = False
 

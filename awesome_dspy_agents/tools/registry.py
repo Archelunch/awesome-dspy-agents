@@ -14,20 +14,20 @@ registry and logging.
 
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Any
-import os
-from pathlib import Path
-import inspect
-from functools import wraps
-from contextvars import ContextVar
 import base64
+import inspect
+import os
+from contextvars import ContextVar
+from functools import wraps
 from io import BytesIO
-from attachments.dspy import Attachments
-import dspy
+from pathlib import Path
+from typing import Any, Callable, Dict, List
+
+import dspy  # type: ignore
+from attachments.dspy import Attachments  # type: ignore
+
 from awesome_dspy_agents.logging_setup import get_logger
-
 from awesome_dspy_agents.tools.ascii_to_png import AsciiToPngConverter
-
 
 tools_logger = get_logger("mad.tools", "tools.log", max_bytes=1_000_000, backup_count=3)
 
@@ -82,6 +82,8 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._functions: Dict[str, Callable[..., Any]] = {}
         self._listeners: List[Callable[[str, Dict[str, Any]], None]] = []
+        # sandbox roots: absolute directories allowed for file tools
+        self._sandbox_roots: List[Path] = []
 
     def add_listener(self, listener: Callable[[str, Dict[str, Any]], None]) -> None:
         """Subscribe to tool events.
@@ -98,6 +100,21 @@ class ToolRegistry:
         """
         if listener not in self._listeners:
             self._listeners.append(listener)
+
+    def set_sandbox_roots(self, roots: List[str]) -> None:
+        self._sandbox_roots = [Path(os.path.expanduser(r)).resolve() for r in roots]
+
+    def _in_sandbox(self, path: Path) -> bool:
+        if not self._sandbox_roots:
+            return True
+        try:
+            p = path.resolve()
+        except Exception:
+            return False
+        return any(
+            str(p).startswith(str(root) + os.sep) or p == root
+            for root in self._sandbox_roots
+        )
 
     def remove_listener(self, listener: Callable[[str, Dict[str, Any]], None]) -> None:
         try:
@@ -266,10 +283,18 @@ def list_files(directory: str) -> str:
     if not base.exists():
         return f"error: path does not exist: {base}"
     if base.is_file():
+        # sandbox check for file
+        if not registry._in_sandbox(base):  # type: ignore[attr-defined]
+            return f"error: access denied by sandbox: {base}"
         return str(base)
 
     try:
-        files = [str(p.resolve()) for p in base.iterdir() if p.is_file()]
+        files = []
+        for p in base.iterdir():
+            if p.is_file():
+                rp = p.resolve()
+                if registry._in_sandbox(rp):  # type: ignore[attr-defined]
+                    files.append(str(rp))
         return "\n".join(files)
     except Exception as e:
         return f"error: {e}"
@@ -282,6 +307,9 @@ def read_file_attachment(path: str) -> Attachments:
     models can consume via signatures that accept Attachments.
     """
     p = Path(os.path.expanduser(path)).resolve()
+    # sandbox check
+    if not registry._in_sandbox(p):  # type: ignore[attr-defined]
+        raise PermissionError(f"access denied by sandbox: {p}")
     if not p.exists() or not p.is_file():
         raise FileNotFoundError(f"File not found: {p}")
     return Attachments(str(p))  # type: ignore[call-arg]
@@ -291,6 +319,9 @@ def write_file(path: str, content: str) -> str:
     """Write text content to a file (UTF-8). Returns absolute path or error."""
     try:
         p = Path(os.path.expanduser(path)).resolve()
+        # sandbox check
+        if not registry._in_sandbox(p):  # type: ignore[attr-defined]
+            return f"error: access denied by sandbox: {p}"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         return str(p)

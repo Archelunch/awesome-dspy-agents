@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, Optional, Iterable, Dict, Any, Callable
+from typing import Any, Callable, Dict, Iterable, Optional, Protocol
 
 
 class AgentPattern(Protocol):
