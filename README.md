@@ -50,6 +50,7 @@ A collection of multi-agent systems implemented with the [DSPy](https://github.c
    ```
 
 ## Table of Contents
+- [Arachne](https://github.com/Strategic-Automation/arachne) - DSPy-native autonomous agent runtime with graph weaving, parallel wave execution, triangulated evaluation, and self-healing.
 
 - [Awesome DSPy Agents](#awesome-dspy-agents)
   - [Installation](#installation)
