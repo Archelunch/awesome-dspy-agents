@@ -464,9 +464,7 @@ class MADFramework(dspy.Module):
                     "agent.role": "judge",
                     "agent.operation": "extract_final_answer",
                     "agent.iteration": len(history),
-                    "agent.module_type": getattr(
-                        self.judge, "module_type", "unknown"
-                    ),
+                    "agent.module_type": getattr(self.judge, "module_type", "unknown"),
                     "agent.answer_owner": True,
                 },
             ) as span:

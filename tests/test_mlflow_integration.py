@@ -91,9 +91,7 @@ class MLflowIntegrationTests(unittest.TestCase):
             span_type=mlflow.entities.SpanType.AGENT,
         )
         span.set_inputs.assert_called_once_with({"topic": "Topic"})
-        span.set_attributes.assert_called_once_with(
-            {"agent.role": "affirmative"}
-        )
+        span.set_attributes.assert_called_once_with({"agent.role": "affirmative"})
         span.set_outputs.assert_called_once_with({"argument": "Answer"})
 
     def test_span_is_noop_outside_enabled_run(self) -> None:
