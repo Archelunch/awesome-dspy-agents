@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import unittest
 
@@ -12,6 +13,11 @@ import dspy
 
 from awesome_dspy_agents.patterns.debate.consensus_free import ConsensusFreeDebate
 from awesome_dspy_agents.patterns.deliberation import EvidenceArtifact
+from awesome_dspy_agents.tools.registry import (
+    FileAccessPolicy,
+    ToolExecutor,
+    default_catalog,
+)
 
 
 class _Proposer(dspy.Module):
@@ -28,6 +34,12 @@ class _Proposer(dspy.Module):
             evidence_ids=[],
             reasoning=f"reason-{perspective}",
         )
+
+
+class _ToolUsingProposer(_Proposer):
+    def forward(self, **inputs):
+        ToolExecutor(default_catalog, FileAccessPolicy()).get("word_count")("one two")
+        return super().forward(**inputs)
 
 
 class _ConflictSelector(dspy.Module):
@@ -75,10 +87,25 @@ class _Arbiter(dspy.Module):
 
     def forward(self, **_inputs):
         self.calls.append(_inputs)
+        candidate_ids = re.findall(
+            r"\[(event-\d+) \|[^\]]+\| (?:proposal|revision)\]",
+            _inputs["trajectory"],
+        )
         return dspy.Prediction(
-            winning_event_id="event-3",
+            winning_event_id=candidate_ids[-1],
+            candidate_scores={event_id: 1.0 for event_id in candidate_ids},
             final_answer="best answer",
             justification="best supported trajectory",
+        )
+
+
+class _NoConflictSelector(dspy.Module):
+    def forward(self, **_inputs):
+        return dspy.Prediction(
+            selected_event_ids=[],
+            conflicts=[],
+            conflict_routes={},
+            conflicts_by_event={},
         )
 
 
@@ -185,6 +212,49 @@ class ConsensusFreeDebateTests(unittest.TestCase):
         self.assertEqual(
             reviser.calls[0]["conflicts"], ["relevant to the first proposal"]
         )
+
+    def test_skips_revision_when_selector_finds_no_meaningful_conflict(self) -> None:
+        debate = ConsensusFreeDebate(agent_count=2)
+        reviser = _Reviser()
+        debate.proposer = _Proposer()
+        debate.conflict_selector = _NoConflictSelector()
+        debate.reviser = reviser
+        debate.arbiter = _Arbiter()
+
+        result = debate(problem="What is correct?")
+
+        self.assertEqual(reviser.calls, [])
+        self.assertEqual(
+            [event.kind for event in result.trajectory.events],
+            ["proposal", "proposal", "critique", "judgment"],
+        )
+        self.assertEqual(result.iterations_used, 0)
+        self.assertTrue(result.stopped_early)
+        self.assertEqual(result.stop_reason, "no_conflict")
+        self.assertEqual(set(result.candidate_scores), {"event-1", "event-2"})
+
+    def test_records_live_agent_tool_results_and_attaches_them_to_proposals(
+        self,
+    ) -> None:
+        debate = ConsensusFreeDebate(agent_count=2)
+        debate.proposer = _ToolUsingProposer()
+        debate.conflict_selector = _ConflictSelector()
+        debate.reviser = _Reviser()
+        debate.arbiter = _Arbiter()
+
+        result = debate(problem="What is correct?")
+
+        tool_events = [
+            event
+            for event in result.trajectory.events
+            if event.kind == "tool_observation"
+        ]
+        proposals = [
+            event for event in result.trajectory.events if event.kind == "proposal"
+        ]
+        self.assertEqual([event.content for event in tool_events], ["2", "2"])
+        self.assertEqual(proposals[0].evidence_ids, (tool_events[0].source_id,))
+        self.assertEqual(proposals[1].evidence_ids, (tool_events[1].source_id,))
 
 
 if __name__ == "__main__":

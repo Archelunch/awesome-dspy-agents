@@ -70,6 +70,9 @@ class ArbitrateFullTrajectory(dspy.Signature):
 
     problem: str = dspy.InputField()
     context: str = dspy.InputField()
+    candidate_event_ids: list[str] = dspy.InputField(
+        desc="Every proposal or revision event that must receive a score"
+    )
     trajectory: str = dspy.InputField(
         desc="Anonymous proposals and revisions from every round"
     )

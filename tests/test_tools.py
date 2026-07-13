@@ -14,6 +14,7 @@ from awesome_dspy_agents.tools.registry import (
     ToolExecutor,
     default_catalog,
     math_eval,
+    tool_event_listener_scope,
 )
 
 
@@ -82,6 +83,23 @@ class ToolSecurityTests(unittest.TestCase):
         )
 
         self.assertEqual(executor.get("word_count")("one two"), "2")
+
+    def test_ambient_listener_receives_tool_result_content(self) -> None:
+        events = []
+        public_events = []
+        executor = ToolExecutor(
+            default_catalog, FileAccessPolicy(), listener=public_events.append
+        )
+
+        with tool_event_listener_scope(events.append):
+            executor.get("word_count")("one two")
+
+        result_event = next(event for event in events if event.kind == "tool_result")
+        public_result = next(
+            event for event in public_events if event.kind == "tool_result"
+        )
+        self.assertEqual(result_event.details["result_preview"], "2")
+        self.assertNotIn("result_preview", public_result.details)
 
 
 if __name__ == "__main__":

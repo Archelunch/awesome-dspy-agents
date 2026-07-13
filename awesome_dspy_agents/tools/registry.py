@@ -67,6 +67,20 @@ class ToolEvent:
 
 
 ToolListener = Callable[[ToolEvent], None]
+_ambient_tool_listeners: ContextVar[tuple[ToolListener, ...]] = ContextVar(
+    "dspy_agents_tool_listeners", default=()
+)
+
+
+@contextmanager
+def tool_event_listener_scope(listener: ToolListener) -> Iterator[None]:
+    """Observe tool events in the current execution context."""
+
+    token = _ambient_tool_listeners.set((*_ambient_tool_listeners.get(), listener))
+    try:
+        yield
+    finally:
+        _ambient_tool_listeners.reset(token)
 
 
 @dataclass(frozen=True)
@@ -140,13 +154,35 @@ class ToolExecutor:
     def build_dspy_tools(self, names: list[str]) -> list[dspy.Tool]:
         return [dspy.Tool(self.get(name)) for name in names]
 
-    def _emit(self, event: ToolEvent) -> None:
-        if self.listener is None:
-            return
-        try:
-            self.listener(event)
-        except Exception as error:
-            logger.warning("Tool listener failed for %s: %s", event.tool, error)
+    def _emit(
+        self,
+        event: ToolEvent,
+        *,
+        ambient_details: Mapping[str, Any] | None = None,
+    ) -> None:
+        ambient_event = (
+            ToolEvent(
+                event.kind,
+                event.tool,
+                event.agent,
+                event.iteration,
+                ambient_details,
+            )
+            if ambient_details is not None
+            else event
+        )
+        for listener in _ambient_tool_listeners.get():
+            if self.listener is not None and listener is self.listener:
+                continue
+            try:
+                listener(ambient_event)
+            except Exception as error:
+                logger.warning("Tool listener failed for %s: %s", event.tool, error)
+        if self.listener is not None:
+            try:
+                self.listener(event)
+            except Exception as error:
+                logger.warning("Tool listener failed for %s: %s", event.tool, error)
 
     def _instrument(
         self, name: str, function: Callable[..., Any]
@@ -179,7 +215,10 @@ class ToolExecutor:
             tools_logger.info(
                 "tool_result", tool=name, agent=agent, iteration=iteration, **details
             )
-            self._emit(ToolEvent("tool_result", name, agent, iteration, details))
+            self._emit(
+                ToolEvent("tool_result", name, agent, iteration, details),
+                ambient_details={**details, "result_preview": str(result)[:2000]},
+            )
             return result
 
         wrapped.__signature__ = inspect.signature(function)  # type: ignore[attr-defined]

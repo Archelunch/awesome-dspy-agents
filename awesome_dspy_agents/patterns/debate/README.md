@@ -40,6 +40,15 @@ result = debate(
 )
 ```
 
+When a configured ReAct role calls a runtime tool, its result is also captured
+automatically as a `tool_observation` event and linked to that role's proposal,
+conflict, revision, or judgment. The normal external tool telemetry remains
+metadata-only; result content is scoped to the deliberation trajectory.
+
+If the conflict selector finds no meaningful disagreement, revision is skipped
+and the independent proposals go directly to arbitration. Otherwise, every
+candidate must receive an explicit arbiter score before a result is returned.
+
 Every optimizable role is a named DSPy predictor:
 
 ```python
