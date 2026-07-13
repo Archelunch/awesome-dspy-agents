@@ -19,6 +19,7 @@ from awesome_dspy_agents.mlflow_integration import (
     MLflowConfig,
     MLflowIntegrationError,
     mlflow_run,
+    mlflow_span,
 )
 from awesome_dspy_agents.patterns.interface import discover_patterns
 from awesome_dspy_agents.runtime import (
@@ -178,16 +179,33 @@ def _execute_pattern(
             config_path=str(config_path),
             version=__version__,
         ) as tracking_run:
-            outcome = pat.run(
-                PatternRunRequest(
-                    topic=topic,
-                    config_path=config_path,
-                    overrides=overrides,
-                    allowed_paths=_allowed_paths,
-                    on_tool_event=_tool_listener,
-                ),
-                on_iteration=_on_iteration,
-            )
+            with mlflow_span(
+                f"pattern.{pattern_name}",
+                span_type="CHAIN",
+                inputs={"topic": topic},
+                attributes={
+                    "agent.pattern": pattern_name,
+                    "agent.config_path": str(config_path),
+                },
+            ) as pattern_span:
+                outcome = pat.run(
+                    PatternRunRequest(
+                        topic=topic,
+                        config_path=config_path,
+                        overrides=overrides,
+                        allowed_paths=_allowed_paths,
+                        on_tool_event=_tool_listener,
+                    ),
+                    on_iteration=_on_iteration,
+                )
+                if pattern_span is not None:
+                    pattern_span.set_outputs(
+                        {
+                            "final_answer": outcome.final_answer,
+                            "justification": outcome.justification,
+                            "iterations_used": outcome.iterations_used,
+                        }
+                    )
             result = asdict(outcome)
             record = {
                 "schema": 2,

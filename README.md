@@ -187,6 +187,10 @@ During runs you will see per-iteration exchanges (debate or addition/subtraction
 Install the `mlflow` extra, then add the global `--mlflow` flag before the command.
 MLflow's DSPy autologging captures module and language-model traces; the integration also
 records the pattern, topic, configuration path, outcome metrics, tags, and `session.json`.
+Pattern runs add a root `CHAIN` span and named `AGENT` spans for each participant, so
+the MLflow trace tree attributes nested DSPy/LM calls to roles such as affirmative,
+negative, judge, addition, and subtraction. The span with `agent.answer_owner=true`
+identifies the role responsible for the final answer.
 
 ```bash
 poetry install -E mlflow

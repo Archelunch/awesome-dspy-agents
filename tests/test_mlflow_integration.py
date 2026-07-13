@@ -3,7 +3,11 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-from awesome_dspy_agents.mlflow_integration import MLflowConfig, mlflow_run
+from awesome_dspy_agents.mlflow_integration import (
+    MLflowConfig,
+    mlflow_run,
+    mlflow_span,
+)
 
 
 class MLflowIntegrationTests(unittest.TestCase):
@@ -23,6 +27,8 @@ class MLflowIntegrationTests(unittest.TestCase):
     def test_enabled_integration_configures_and_logs_run(self) -> None:
         mlflow = MagicMock()
         mlflow.start_run.return_value.__enter__.return_value = MagicMock()
+        span = MagicMock()
+        mlflow.start_span.return_value.__enter__.return_value = span
         config = MLflowConfig(
             enabled=True,
             tracking_uri="http://localhost:5000",
@@ -40,6 +46,14 @@ class MLflowIntegrationTests(unittest.TestCase):
                 version="1.0",
             ) as run:
                 assert run is not None
+                with mlflow_span(
+                    "agent.affirmative",
+                    span_type="AGENT",
+                    inputs={"topic": "Topic"},
+                    attributes={"agent.role": "affirmative"},
+                ) as active_span:
+                    self.assertIs(active_span, span)
+                    active_span.set_outputs({"argument": "Answer"})
                 run.log_outcome(
                     {
                         "result": {
@@ -72,6 +86,20 @@ class MLflowIntegrationTests(unittest.TestCase):
             }
         )
         mlflow.log_dict.assert_called_once()
+        mlflow.start_span.assert_called_once_with(
+            name="agent.affirmative",
+            span_type=mlflow.entities.SpanType.AGENT,
+        )
+        span.set_inputs.assert_called_once_with({"topic": "Topic"})
+        span.set_attributes.assert_called_once_with({"agent.role": "affirmative"})
+        span.set_outputs.assert_called_once_with({"argument": "Answer"})
+
+    def test_span_is_noop_outside_enabled_run(self) -> None:
+        with patch("importlib.import_module") as import_module:
+            with mlflow_span("agent", span_type="AGENT") as span:
+                self.assertIsNone(span)
+
+        import_module.assert_not_called()
 
 
 if __name__ == "__main__":
