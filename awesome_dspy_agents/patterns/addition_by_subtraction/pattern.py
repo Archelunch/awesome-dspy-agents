@@ -6,6 +6,7 @@ import dspy  # type: ignore
 
 from awesome_dspy_agents.config import AppConfig, build_lm, load_config
 from awesome_dspy_agents.logging_setup import get_logger
+from awesome_dspy_agents.mlflow_integration import mlflow_span
 from awesome_dspy_agents.patterns.interface import AgentPattern
 from awesome_dspy_agents.predictor import build_predictor
 from awesome_dspy_agents.runtime import (
@@ -175,17 +176,70 @@ class ABSFramework(dspy.Module):
             iter_token = set_current_iteration(iteration)
             try:
                 # Addition produces candidate
-                add_out = self.addition(
-                    context=H_context, instruction=H_instruction, history=hist_str
-                )
+                with mlflow_span(
+                    "agent.addition",
+                    span_type="AGENT",
+                    inputs={
+                        "context": H_context,
+                        "instruction": H_instruction,
+                        "history": hist_str,
+                    },
+                    attributes={
+                        "agent.pattern": "addition_by_subtraction",
+                        "agent.role": "addition",
+                        "agent.iteration": iteration,
+                        "agent.module_type": getattr(
+                            self.addition, "module_type", "unknown"
+                        ),
+                        "agent.answer_owner": False,
+                    },
+                ) as span:
+                    add_out = self.addition(
+                        context=H_context,
+                        instruction=H_instruction,
+                        history=hist_str,
+                    )
+                    if span is not None:
+                        span.set_outputs(
+                            {
+                                "candidate_response": add_out.candidate_response,
+                                "reasoning": add_out.reasoning,
+                            }
+                        )
 
                 # Subtraction refines
-                sub_out = self.subtraction(
-                    context=H_context,
-                    instruction=H_instruction,
-                    history=hist_str,
-                    candidate_response=add_out.candidate_response,
-                )
+                with mlflow_span(
+                    "agent.subtraction",
+                    span_type="AGENT",
+                    inputs={
+                        "context": H_context,
+                        "instruction": H_instruction,
+                        "history": hist_str,
+                        "candidate_response": add_out.candidate_response,
+                    },
+                    attributes={
+                        "agent.pattern": "addition_by_subtraction",
+                        "agent.role": "subtraction",
+                        "agent.iteration": iteration,
+                        "agent.module_type": getattr(
+                            self.subtraction, "module_type", "unknown"
+                        ),
+                        "agent.answer_owner": True,
+                    },
+                ) as span:
+                    sub_out = self.subtraction(
+                        context=H_context,
+                        instruction=H_instruction,
+                        history=hist_str,
+                        candidate_response=add_out.candidate_response,
+                    )
+                    if span is not None:
+                        span.set_outputs(
+                            {
+                                "refined_response": sub_out.refined_response,
+                                "feedback": sub_out.feedback,
+                            }
+                        )
 
                 exchange = AdditionBySubtractionExchange(
                     addition=add_out.candidate_response,

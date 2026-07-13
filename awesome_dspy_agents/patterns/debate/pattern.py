@@ -6,6 +6,7 @@ import dspy  # type: ignore
 
 from awesome_dspy_agents.config import AppConfig, build_lm, load_config
 from awesome_dspy_agents.logging_setup import get_logger
+from awesome_dspy_agents.mlflow_integration import mlflow_span
 from awesome_dspy_agents.patterns.interface import AgentPattern
 from awesome_dspy_agents.predictor import build_predictor
 from awesome_dspy_agents.runtime import (
@@ -288,17 +289,66 @@ class MADFramework(dspy.Module):
             iter_token = set_current_iteration(iteration)
             try:
                 # Affirmative speaks
-                aff_response = self.affirmative(
-                    debate_topic=debate_topic,
-                    debate_history=history_str,
-                )
+                with mlflow_span(
+                    "agent.affirmative",
+                    span_type="AGENT",
+                    inputs={
+                        "debate_topic": debate_topic,
+                        "debate_history": history_str,
+                    },
+                    attributes={
+                        "agent.pattern": "debate",
+                        "agent.role": "affirmative",
+                        "agent.iteration": iteration,
+                        "agent.module_type": getattr(
+                            self.affirmative, "module_type", "unknown"
+                        ),
+                        "agent.answer_owner": False,
+                    },
+                ) as span:
+                    aff_response = self.affirmative(
+                        debate_topic=debate_topic,
+                        debate_history=history_str,
+                    )
+                    if span is not None:
+                        span.set_outputs(
+                            {
+                                "argument": aff_response.argument,
+                                "reasoning": aff_response.reasoning,
+                            }
+                        )
 
                 # Negative responds
-                neg_response = self.negative(
-                    debate_topic=debate_topic,
-                    debate_history=history_str,
-                    affirmative_argument=aff_response.argument,
-                )
+                with mlflow_span(
+                    "agent.negative",
+                    span_type="AGENT",
+                    inputs={
+                        "debate_topic": debate_topic,
+                        "debate_history": history_str,
+                        "affirmative_argument": aff_response.argument,
+                    },
+                    attributes={
+                        "agent.pattern": "debate",
+                        "agent.role": "negative",
+                        "agent.iteration": iteration,
+                        "agent.module_type": getattr(
+                            self.negative, "module_type", "unknown"
+                        ),
+                        "agent.answer_owner": False,
+                    },
+                ) as span:
+                    neg_response = self.negative(
+                        debate_topic=debate_topic,
+                        debate_history=history_str,
+                        affirmative_argument=aff_response.argument,
+                    )
+                    if span is not None:
+                        span.set_outputs(
+                            {
+                                "counter_argument": neg_response.counter_argument,
+                                "reasoning": neg_response.reasoning,
+                            }
+                        )
 
                 # Record exchange
                 exchange = DebateExchange(
@@ -320,11 +370,38 @@ class MADFramework(dspy.Module):
                 # Judge evaluates
                 if self.adaptive_break:
                     history_str = self.format_history(history)
-                    judge_eval = self.judge.evaluate_debate(
-                        debate_topic=debate_topic,
-                        debate_history=history_str,
-                        current_iteration=iteration,
-                    )
+                    with mlflow_span(
+                        "agent.judge.evaluate",
+                        span_type="AGENT",
+                        inputs={
+                            "debate_topic": debate_topic,
+                            "debate_history": history_str,
+                            "current_iteration": iteration,
+                        },
+                        attributes={
+                            "agent.pattern": "debate",
+                            "agent.role": "judge",
+                            "agent.operation": "evaluate",
+                            "agent.iteration": iteration,
+                            "agent.module_type": getattr(
+                                self.judge, "module_type", "unknown"
+                            ),
+                            "agent.answer_owner": False,
+                        },
+                    ) as span:
+                        judge_eval = self.judge.evaluate_debate(
+                            debate_topic=debate_topic,
+                            debate_history=history_str,
+                            current_iteration=iteration,
+                        )
+                        if span is not None:
+                            span.set_outputs(
+                                {
+                                    "solution_found": judge_eval.solution_found,
+                                    "confidence": judge_eval.confidence,
+                                    "reasoning": judge_eval.reasoning,
+                                }
+                            )
 
                     exchange = replace(exchange, judge_eval=judge_eval.reasoning)
                     history[-1] = exchange
@@ -339,10 +416,35 @@ class MADFramework(dspy.Module):
 
                     if judge_eval.solution_found and judge_eval.confidence > 0.7:
                         solution_found = True
-                        final_answer = self.judge.extract_solution(
-                            debate_topic=debate_topic,
-                            debate_history=history_str,
-                        )
+                        with mlflow_span(
+                            "agent.judge.final_answer",
+                            span_type="AGENT",
+                            inputs={
+                                "debate_topic": debate_topic,
+                                "debate_history": history_str,
+                            },
+                            attributes={
+                                "agent.pattern": "debate",
+                                "agent.role": "judge",
+                                "agent.operation": "extract_final_answer",
+                                "agent.iteration": iteration,
+                                "agent.module_type": getattr(
+                                    self.judge, "module_type", "unknown"
+                                ),
+                                "agent.answer_owner": True,
+                            },
+                        ) as span:
+                            final_answer = self.judge.extract_solution(
+                                debate_topic=debate_topic,
+                                debate_history=history_str,
+                            )
+                            if span is not None:
+                                span.set_outputs(
+                                    {
+                                        "final_answer": final_answer.final_answer,
+                                        "justification": final_answer.justification,
+                                    }
+                                )
                         break
             finally:
                 reset_current_iteration(iter_token)
@@ -350,10 +452,35 @@ class MADFramework(dspy.Module):
         # Extract final answer if not found adaptively
         if not solution_found:
             history_str = self.format_history(history)
-            final_prediction = self.judge.extract_solution(
-                debate_topic=debate_topic,
-                debate_history=history_str,
-            )
+            with mlflow_span(
+                "agent.judge.final_answer",
+                span_type="AGENT",
+                inputs={
+                    "debate_topic": debate_topic,
+                    "debate_history": history_str,
+                },
+                attributes={
+                    "agent.pattern": "debate",
+                    "agent.role": "judge",
+                    "agent.operation": "extract_final_answer",
+                    "agent.iteration": len(history),
+                    "agent.module_type": getattr(
+                        self.judge, "module_type", "unknown"
+                    ),
+                    "agent.answer_owner": True,
+                },
+            ) as span:
+                final_prediction = self.judge.extract_solution(
+                    debate_topic=debate_topic,
+                    debate_history=history_str,
+                )
+                if span is not None:
+                    span.set_outputs(
+                        {
+                            "final_answer": final_prediction.final_answer,
+                            "justification": final_prediction.justification,
+                        }
+                    )
             final_answer = final_prediction
 
         if final_answer is None:

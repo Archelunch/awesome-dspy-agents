@@ -3,8 +3,13 @@ from __future__ import annotations
 import importlib
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
+
+_tracing_enabled: ContextVar[bool] = ContextVar(
+    "awesome_dspy_agents_mlflow_tracing_enabled", default=False
+)
 
 
 class MLflowIntegrationError(RuntimeError):
@@ -56,6 +61,30 @@ def _load_mlflow() -> Any:
 
 
 @contextmanager
+def mlflow_span(
+    name: str,
+    *,
+    span_type: str,
+    inputs: Mapping[str, Any] | None = None,
+    attributes: Mapping[str, Any] | None = None,
+) -> Iterator[Any | None]:
+    """Create an application-level span only inside an enabled MLflow run."""
+
+    if not _tracing_enabled.get():
+        yield None
+        return
+
+    mlflow = _load_mlflow()
+    resolved_span_type = getattr(mlflow.entities.SpanType, span_type)
+    with mlflow.start_span(name=name, span_type=resolved_span_type) as span:
+        if inputs:
+            span.set_inputs(dict(inputs))
+        if attributes:
+            span.set_attributes(dict(attributes))
+        yield span
+
+
+@contextmanager
 def mlflow_run(
     config: MLflowConfig,
     *,
@@ -82,11 +111,15 @@ def mlflow_run(
         **dict(config.tags or {}),
     }
     with mlflow.start_run(run_name=config.run_name, tags=tags):
-        mlflow.log_params(
-            {
-                "pattern": pattern,
-                "topic": topic,
-                "config_path": config_path,
-            }
-        )
-        yield MLflowRun(mlflow)
+        tracing_token = _tracing_enabled.set(True)
+        try:
+            mlflow.log_params(
+                {
+                    "pattern": pattern,
+                    "topic": topic,
+                    "config_path": config_path,
+                }
+            )
+            yield MLflowRun(mlflow)
+        finally:
+            _tracing_enabled.reset(tracing_token)
