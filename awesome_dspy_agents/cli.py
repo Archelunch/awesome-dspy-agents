@@ -1,21 +1,32 @@
 # pyright: reportMissingTypeStubs=false
 import json
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import dspy  # type: ignore
 import questionary  # type: ignore
 import typer  # type: ignore
+import yaml  # type: ignore
 from rich.console import Console  # type: ignore
 from rich.markdown import Markdown  # type: ignore
 from rich.panel import Panel  # type: ignore
 from rich.table import Table  # type: ignore
 
 from awesome_dspy_agents import __version__, tui
-from awesome_dspy_agents.config import AppConfig, build_lm
-from awesome_dspy_agents.patterns.interface import find_patterns
-from awesome_dspy_agents.tools.registry import registry
+from awesome_dspy_agents.evaluation import compare_answers
+from awesome_dspy_agents.patterns.interface import discover_patterns
+from awesome_dspy_agents.runtime import (
+    IterationEvent,
+    PatternRunRequest,
+    exchange_to_dict,
+)
+from awesome_dspy_agents.tools.registry import (
+    FileAccessPolicy,
+    ToolEvent,
+    ToolExecutor,
+    default_catalog,
+)
 
 # --- Setup ---
 
@@ -28,45 +39,16 @@ app = typer.Typer(
 
 console = Console()
 PATTERNS_DIR = Path(__file__).parent / "patterns"
-
-
-# --- Helper Functions ---
-
-
-def _install_default_lm(cfg: AppConfig) -> None:
-    if cfg.default_lm is None:
-        return
-    default_lm = build_lm(cfg.default_lm)
-    dspy.configure(lm=default_lm)
-
-
-def _iteration_callback(iteration: int, exchange: dict, history: str) -> None:
-    # When called the first time (no judge_eval), print the exchange table.
-    # When called the second time (with judge_eval), only print the judge panel.
-    if "judge_eval" not in exchange:
-        table = Table(show_header=True, header_style="bold magenta")
-        table.add_column("Iteration", justify="right", style="cyan", width=10)
-        table.add_column("Affirmative", style="green")
-        table.add_column("Negative", style="red")
-        table.add_row(
-            str(iteration),
-            exchange.get("affirmative", ""),
-            exchange.get("negative", ""),
-        )
-        console.print(table)
-
-    if "judge_eval" in exchange:
-        console.print(
-            Panel.fit(
-                exchange["judge_eval"],
-                title=f"Judge @ {iteration}",
-                border_style="yellow",
-            )
-        )
+_allowed_paths: tuple[Path, ...] = ()
 
 
 def _pattern_map():
-    return find_patterns(PATTERNS_DIR)
+    catalog = discover_patterns(PATTERNS_DIR)
+    for issue in catalog.issues:
+        console.print(
+            f"[yellow]Pattern discovery issue ({issue.pattern}):[/yellow] {issue.message}"
+        )
+    return catalog.patterns
 
 
 # --- CLI Commands ---
@@ -80,20 +62,12 @@ def _setup(
         help="Allow file tools to access given absolute directories (repeatable)",
     ),
 ):
-    if allow_path:
-        registry.set_sandbox_roots(allow_path)
+    global _allowed_paths
+    _allowed_paths = tuple(Path(path).expanduser().resolve() for path in allow_path or [])
 
 
 def _coerce_value(s: str):
-    sl = s.lower()
-    if sl in ("true", "false"):
-        return sl == "true"
-    try:
-        if "." in s:
-            return float(s)
-        return int(s)
-    except ValueError:
-        return s
+    return yaml.safe_load(s)
 
 
 def _parse_overrides(set: Optional[list[str]]) -> dict:
@@ -117,7 +91,6 @@ def _execute_pattern(
     topic: str,
     config_path: Path,
     overrides: dict,
-    stream: bool,
     json_output: bool,
     save_path: Optional[Path],
 ) -> Dict[str, Any]:
@@ -133,48 +106,50 @@ def _execute_pattern(
     tool_events_by_iter: Dict[int, List[Dict[str, Any]]] = {}
     printed_index_by_iter: Dict[int, int] = {}
 
-    def _tool_listener(event: str, payload: Dict[str, Any]) -> None:
-        try:
-            iteration = int(payload.get("iteration", 0))
-        except Exception:
-            iteration = 0
+    def _tool_listener(event: ToolEvent) -> None:
+        iteration = event.iteration
         if iteration <= 0:
             return
         tool_events_by_iter.setdefault(iteration, []).append(
             {
-                "event": event,
-                **payload,
+                "event": event.kind,
+                "tool": event.tool,
+                "agent": event.agent,
+                "iteration": event.iteration,
+                **event.details,
             }
         )
 
-    def _on_iteration(iteration: int, exchange: dict, history: str) -> None:
+    def _on_iteration(event: IterationEvent) -> None:
         if not json_output:
-            tui.render_iteration(iteration, exchange)
-            events = tool_events_by_iter.get(iteration, [])
-            start_idx = printed_index_by_iter.get(iteration, 0)
-            printed_index_by_iter[iteration] = tui.render_tool_events(
-                iteration, events, start_idx
+            tui.render_iteration(event.iteration, exchange_to_dict(event.exchange))
+            events = tool_events_by_iter.get(event.iteration, [])
+            start_idx = printed_index_by_iter.get(event.iteration, 0)
+            printed_index_by_iter[event.iteration] = tui.render_tool_events(
+                event.iteration, events, start_idx
             )
 
     if not json_output:
         tui.render_header(pattern_name, topic)
 
-    registry.add_listener(_tool_listener)
     try:
-        result = pat.run(
-            topic=topic,
-            config_path=config_path,
-            overrides=overrides,
+        outcome = pat.run(
+            PatternRunRequest(
+                topic=topic,
+                config_path=config_path,
+                overrides=overrides,
+                allowed_paths=_allowed_paths,
+                on_tool_event=_tool_listener,
+            ),
             on_iteration=_on_iteration,
         )
     except Exception as e:
         console.print(f"[bold red]Error during run:[/bold red] {e}")
         raise typer.Exit(code=1)
-    finally:
-        registry.remove_listener(_tool_listener)
 
+    result = asdict(outcome)
     record = {
-        "schema": 1,
+        "schema": 2,
         "timestamp": datetime.utcnow().isoformat() + "Z",
         "version": __version__,
         "pattern": pattern_name,
@@ -197,9 +172,7 @@ def _execute_pattern(
     if json_output:
         console.print_json(data=record)
     else:
-        tui.render_final(
-            result.get("final_answer", ""), result.get("justification", "")
-        )
+        tui.render_final(outcome.final_answer, outcome.justification)
 
     return record
 
@@ -283,7 +256,6 @@ def run(
     set: Optional[list[str]] = typer.Option(
         None, "--set", help="Override config values, e.g. debate.max_iterations=5"
     ),
-    stream: bool = typer.Option(False, "--stream", help="Stream tokens if supported"),
     json_output: bool = typer.Option(
         False, "--json", help="Emit JSON record instead of TUI"
     ),
@@ -327,7 +299,6 @@ def run(
         topic=topic,
         config_path=config_path,
         overrides=overrides,
-        stream=stream,
         json_output=json_output,
         save_path=save,
     )
@@ -345,8 +316,9 @@ def tools(
     """List available tools (global or for a given pattern)."""
     console.print(Panel.fit("Available Tools", style="bold blue"))
     if describe:
+        executor = ToolExecutor(default_catalog, FileAccessPolicy())
         try:
-            fn = registry.get(describe)
+            fn = executor.get(describe)
         except KeyError:
             console.print(f"[bold red]Error:[/bold red] Unknown tool '{describe}'")
             raise typer.Exit(code=1)
@@ -372,7 +344,7 @@ def tools(
         for t in pat.available_tools():
             table.add_row(t, f"pattern:{pattern_name}")
     else:
-        for t in registry.names():
+        for t in default_catalog.names():
             table.add_row(t, "global")
 
     console.print(table)
@@ -400,36 +372,6 @@ def configs(
     table.add_column("Path", style="green")
     for p in pat.available_configs():
         table.add_row(p.stem, str(p))
-    console.print(table)
-
-
-@app.command("scripts")
-def scripts(
-    pattern_name: str = typer.Argument(
-        ..., help="Pattern to list optimization/eval scripts for"
-    ),
-):
-    """List optimization/evaluation scripts provided by a pattern."""
-    pat = _pattern_map().get(pattern_name)
-    if not pat:
-        console.print(
-            f"[bold red]Error:[/bold red] Pattern '{pattern_name}' not found."
-        )
-        raise typer.Exit(code=1)
-    scripts_map = pat.available_scripts()
-    console.print(
-        Panel.fit(
-            f"Scripts for [bold cyan]{pattern_name}[/bold cyan]", style="bold blue"
-        )
-    )
-    if not scripts_map:
-        console.print("No scripts available.")
-        return
-    table = Table(show_header=True, header_style="bold magenta")
-    table.add_column("Script", style="cyan")
-    table.add_column("Description", style="green")
-    for k, v in scripts_map.items():
-        table.add_row(k, v)
     console.print(table)
 
 
@@ -482,7 +424,6 @@ def interactive():
         topic=topic,
         config_path=config_path,
         overrides=overrides,
-        stream=False,
         json_output=False,
         save_path=None,
     )
@@ -496,6 +437,10 @@ def replay(path: Path = typer.Argument(..., help="Path to saved session JSON")):
         console.print(f"[bold red]Error:[/bold red] {e}")
         raise typer.Exit(code=1)
 
+    if data.get("schema") != 2:
+        console.print("[bold red]Error:[/bold red] Only session schema 2 is supported.")
+        raise typer.Exit(code=1)
+
     pattern_name = data.get("pattern", "?")
     topic = data.get("topic", "")
     tui.render_header(pattern_name, topic)
@@ -503,11 +448,7 @@ def replay(path: Path = typer.Argument(..., help="Path to saved session JSON")):
         int(k): v for k, v in (data.get("tool_events_by_iter", {}) or {}).items()
     }
     printed_index_by_iter: Dict[int, int] = {}
-    history = (
-        data.get("result", {}).get("history")
-        or data.get("result", {}).get("debate_history")
-        or []
-    )
+    history = data.get("result", {}).get("history") or []
     for i, exchange in enumerate(history, 1):
         tui.render_iteration(i, exchange)
         events = events_by_iter.get(i, [])
@@ -526,17 +467,25 @@ def compare(
     topic: str = typer.Argument(..., help="Topic"),
     config_a: Optional[Path] = typer.Option(None, "--config-a"),
     config_b: Optional[Path] = typer.Option(None, "--config-b"),
-    metric: str = typer.Option("exact", "--metric", help="exact|len|jaccard"),
+    metric: str = typer.Option("exact", "--metric", help="exact|length|jaccard"),
 ):
     patterns = _pattern_map()
+    if pattern_a not in patterns or pattern_b not in patterns:
+        console.print("[bold red]Error:[/bold red] Both patterns must exist.")
+        raise typer.Exit(code=1)
+    if metric not in {"exact", "length", "jaccard"}:
+        console.print(f"[bold red]Error:[/bold red] Unknown metric '{metric}'.")
+        raise typer.Exit(code=1)
     cfg_a = config_a or patterns[pattern_a].default_config_path()
     cfg_b = config_b or patterns[pattern_b].default_config_path()
+    if cfg_a is None or cfg_b is None:
+        console.print("[bold red]Error:[/bold red] Both patterns require configurations.")
+        raise typer.Exit(code=1)
     rec_a = _execute_pattern(
         pattern_name=pattern_a,
         topic=topic,
         config_path=cfg_a,
         overrides={},
-        stream=False,
         json_output=False,
         save_path=None,
     )
@@ -545,7 +494,6 @@ def compare(
         topic=topic,
         config_path=cfg_b,
         overrides={},
-        stream=False,
         json_output=False,
         save_path=None,
     )
@@ -558,6 +506,7 @@ def compare(
     t.add_row(pattern_a, (a[:120] + "…") if len(a) > 120 else a)
     t.add_row(pattern_b, (b[:120] + "…") if len(b) > 120 else b)
     console.print(t)
+    console.print(f"{metric} similarity: {compare_answers(a, b, metric):.3f}")
 
 
 @app.command("version")

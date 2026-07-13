@@ -1,38 +1,30 @@
-"""
-Global tools registry for DSPy agents.
-
-Provides:
-- ToolRegistry: register callables by name and build dspy.Tool list
-- Agent context helpers: set_current_agent/reset_current_agent for logging
-- Built-in tools: math_eval, word_count, ascii_to_png
-
-This module centralizes tool registration so all patterns can use the same
-registry and logging.
-"""
-
-# pyright: reportMissingTypeStubs=false
+"""Per-run tool catalog, access policy, execution, and telemetry."""
 
 from __future__ import annotations
 
+import ast
 import base64
 import inspect
-import os
+import logging
+import math
+import operator
+from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import wraps
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Protocol, Sequence
 
-import dspy  # type: ignore
+import dspy
 from attachments.dspy import Attachments  # type: ignore
 
 from awesome_dspy_agents.logging_setup import get_logger
 from awesome_dspy_agents.tools.ascii_to_png import AsciiToPngConverter
 
 tools_logger = get_logger("mad.tools", "tools.log", max_bytes=1_000_000, backup_count=3)
+logger = logging.getLogger(__name__)
 
-
-# Agent/iteration context for tool calls
 _current_agent: ContextVar[str] = ContextVar("mad_current_agent", default="unknown")
 _current_iteration: ContextVar[int] = ContextVar("mad_current_iteration", default=0)
 
@@ -42,17 +34,11 @@ def set_current_agent(role: str):
 
 
 def reset_current_agent(token: Any) -> None:
-    try:
-        _current_agent.reset(token)
-    except Exception:
-        pass
+    _current_agent.reset(token)
 
 
 def get_current_agent() -> str:
-    try:
-        return _current_agent.get()
-    except Exception:
-        return "unknown"
+    return _current_agent.get()
 
 
 def set_current_iteration(iteration: int):
@@ -60,193 +46,228 @@ def set_current_iteration(iteration: int):
 
 
 def reset_current_iteration(token: Any) -> None:
-    try:
-        _current_iteration.reset(token)
-    except Exception:
-        pass
+    _current_iteration.reset(token)
 
 
 def get_current_iteration() -> int:
-    try:
-        return _current_iteration.get()
-    except Exception:
-        return 0
+    return _current_iteration.get()
 
 
-class ToolRegistry:
-    """Simple registry mapping string names to callable tools.
+@dataclass(frozen=True)
+class ToolEvent:
+    kind: str
+    tool: str
+    agent: str
+    iteration: int
+    details: Mapping[str, Any]
 
-    Wraps callables with dspy.Tool lazily to keep registration straightforward.
-    """
 
-    def __init__(self) -> None:
-        self._functions: Dict[str, Callable[..., Any]] = {}
-        self._listeners: List[Callable[[str, Dict[str, Any]], None]] = []
-        # sandbox roots: absolute directories allowed for file tools
-        self._sandbox_roots: List[Path] = []
+ToolListener = Callable[[ToolEvent], None]
 
-    def add_listener(self, listener: Callable[[str, Dict[str, Any]], None]) -> None:
-        """Subscribe to tool events.
 
-        Listener signature: (event: str, payload: Dict[str, Any]) -> None
+@dataclass(frozen=True)
+class FileAccessPolicy:
+    """Resolve filesystem access against explicit roots; no roots means deny."""
 
-        Events emitted:
-        - "tool_call": before a tool is executed
-            payload keys: tool, agent, iteration, args_preview, kwargs_preview
-        - "tool_result": after a tool returns
-            payload keys: tool, agent, iteration, result_type, size
-        - "tool_error": when a tool raises an exception
-            payload keys: tool, agent, iteration, error
-        """
-        if listener not in self._listeners:
-            self._listeners.append(listener)
+    roots: tuple[Path, ...] = ()
 
-    def set_sandbox_roots(self, roots: List[str]) -> None:
-        self._sandbox_roots = [Path(os.path.expanduser(r)).resolve() for r in roots]
+    @classmethod
+    def from_paths(cls, roots: Sequence[Path | str]) -> "FileAccessPolicy":
+        return cls(tuple(Path(root).expanduser().resolve() for root in roots))
 
-    def _in_sandbox(self, path: Path) -> bool:
-        if not self._sandbox_roots:
-            return True
-        try:
-            p = path.resolve()
-        except Exception:
+    def allows(self, path: Path | str) -> bool:
+        if not self.roots:
             return False
-        return any(
-            str(p).startswith(str(root) + os.sep) or p == root
-            for root in self._sandbox_roots
-        )
-
-    def remove_listener(self, listener: Callable[[str, Dict[str, Any]], None]) -> None:
         try:
-            self._listeners.remove(listener)
-        except ValueError:
-            pass
+            resolved = Path(path).expanduser().resolve()
+            return any(resolved == root or resolved.is_relative_to(root) for root in self.roots)
+        except (OSError, RuntimeError):
+            return False
 
-    def _emit(self, event: str, payload: Dict[str, Any]) -> None:
-        for listener in list(self._listeners):
-            try:
-                listener(event, payload)
-            except Exception:
-                # Never let listeners break tool execution
-                pass
+    def require(self, path: Path | str) -> Path:
+        resolved = Path(path).expanduser().resolve()
+        if not self.allows(resolved):
+            raise PermissionError(f"access denied by file policy: {resolved}")
+        return resolved
 
-    def register(self, name: str, fn: Callable[..., Any]) -> None:
-        if not callable(fn):
-            raise TypeError("Tool must be callable")
 
-        # Wrap with logging
-        @wraps(fn)
-        def _wrapped(*args: Any, **kwargs: Any) -> Any:
-            agent = get_current_agent()
-            iteration = get_current_iteration()
-            try:
-                preview_args = str(args)[:200]
-                preview_kwargs = str(kwargs)[:200]
-                tools_logger.info(
-                    "tool_call",
-                    agent=agent,
-                    tool=name,
-                    iteration=iteration,
-                    args_preview=preview_args,
-                    kwargs_preview=preview_kwargs,
-                )
-                self._emit(
-                    "tool_call",
-                    {
-                        "tool": name,
-                        "agent": agent,
-                        "iteration": iteration,
-                        "args_preview": preview_args,
-                        "kwargs_preview": preview_kwargs,
-                    },
-                )
-            except Exception:
-                pass
-            try:
-                result = fn(*args, **kwargs)
-            except Exception as e:
-                try:
-                    tools_logger.info(
-                        "tool_error",
-                        agent=agent,
-                        tool=name,
-                        iteration=iteration,
-                        error=str(e),
-                    )
-                    self._emit(
-                        "tool_error",
-                        {
-                            "tool": name,
-                            "agent": agent,
-                            "iteration": iteration,
-                            "error": str(e),
-                        },
-                    )
-                except Exception:
-                    pass
-                raise
-            try:
-                result_repr = type(result).__name__
-                size_hint = None
-                if isinstance(result, str):
-                    size_hint = len(result)
-                tools_logger.info(
-                    "tool_result",
-                    agent=agent,
-                    tool=name,
-                    iteration=iteration,
-                    result_type=result_repr,
-                    size=size_hint,
-                )
-                self._emit(
-                    "tool_result",
-                    {
-                        "tool": name,
-                        "agent": agent,
-                        "iteration": iteration,
-                        "result_type": result_repr,
-                        "size": size_hint,
-                    },
-                )
-            except Exception:
-                pass
-            return result
+ToolFactory = Callable[[FileAccessPolicy], Callable[..., Any]]
 
-        # Preserve original callable signature for DSPy Tool introspection
+
+class ToolCatalog:
+    """Immutable-by-convention catalog of named tool factories."""
+
+    def __init__(self, definitions: Optional[Mapping[str, ToolFactory]] = None) -> None:
+        self._definitions = dict(definitions or {})
+
+    def register(self, name: str, factory: ToolFactory) -> None:
+        if name in self._definitions:
+            raise ValueError(f"Tool '{name}' is already registered")
+        self._definitions[name] = factory
+
+    def build(self, name: str, policy: FileAccessPolicy) -> Callable[..., Any]:
         try:
-            _wrapped.__signature__ = inspect.signature(fn)  # type: ignore[attr-defined]
-        except Exception:
-            pass
-
-        self._functions[name] = _wrapped
-
-    def get(self, name: str) -> Callable[..., Any]:
-        return self._functions[name]
+            return self._definitions[name](policy)
+        except KeyError as error:
+            raise KeyError(f"Unknown tool '{name}'") from error
 
     def names(self) -> List[str]:
-        return sorted(self._functions.keys())
-
-    def build_dspy_tools(self, names: List[str]) -> List[dspy.Tool]:  # type: ignore[name-defined]
-        tools: List[dspy.Tool] = []  # type: ignore[name-defined]
-        for n in names:
-            fn = self._functions.get(n)
-            if fn is None:
-                raise KeyError(f"Unknown tool '{n}'")
-            tools.append(dspy.Tool(fn))  # type: ignore[attr-defined]
-        return tools
+        return sorted(self._definitions)
 
 
-# Global registry instance and built-in example tools
-registry = ToolRegistry()
+class ToolExecutor:
+    """Build DSPy tools with per-run policy and telemetry."""
+
+    def __init__(
+        self,
+        catalog: ToolCatalog,
+        policy: FileAccessPolicy,
+        listener: Optional[ToolListener] = None,
+    ) -> None:
+        self.catalog = catalog
+        self.policy = policy
+        self.listener = listener
+
+    def get(self, name: str) -> Callable[..., Any]:
+        return self._instrument(name, self.catalog.build(name, self.policy))
+
+    def build_dspy_tools(self, names: List[str]) -> List[dspy.Tool]:
+        return [dspy.Tool(self.get(name)) for name in names]
+
+    def _emit(self, event: ToolEvent) -> None:
+        if self.listener is None:
+            return
+        try:
+            self.listener(event)
+        except Exception as error:
+            logger.warning("Tool listener failed for %s: %s", event.tool, error)
+
+    def _instrument(self, name: str, function: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(function)
+        def wrapped(*args: Any, **kwargs: Any) -> Any:
+            agent = get_current_agent()
+            iteration = get_current_iteration()
+            call_details = {
+                "args_preview": str(args)[:200],
+                "kwargs_preview": str(kwargs)[:200],
+            }
+            tools_logger.info("tool_call", tool=name, agent=agent, iteration=iteration, **call_details)
+            self._emit(ToolEvent("tool_call", name, agent, iteration, call_details))
+            try:
+                result = function(*args, **kwargs)
+            except Exception as error:
+                details = {"error": str(error)}
+                tools_logger.info("tool_error", tool=name, agent=agent, iteration=iteration, **details)
+                self._emit(ToolEvent("tool_error", name, agent, iteration, details))
+                raise
+            details = {
+                "result_type": type(result).__name__,
+                "size": len(result) if isinstance(result, str) else None,
+            }
+            tools_logger.info("tool_result", tool=name, agent=agent, iteration=iteration, **details)
+            self._emit(ToolEvent("tool_result", name, agent, iteration, details))
+            return result
+
+        wrapped.__signature__ = inspect.signature(function)  # type: ignore[attr-defined]
+        return wrapped
+
+
+class ToolProvider(Protocol):
+    def build_dspy_tools(self, names: List[str]) -> List[dspy.Tool]: ...
+
+
+_current_executor: ContextVar[Optional[ToolExecutor]] = ContextVar(
+    "dspy_agents_tool_executor", default=None
+)
+
+
+@contextmanager
+def tool_executor_scope(executor: ToolExecutor) -> Iterator[None]:
+    token = _current_executor.set(executor)
+    try:
+        yield
+    finally:
+        _current_executor.reset(token)
+
+
+class RuntimeToolProvider:
+    def build_dspy_tools(self, names: List[str]) -> List[dspy.Tool]:
+        executor = _current_executor.get()
+        if executor is None:
+            raise RuntimeError("Tools must be built inside a Pattern run")
+        return executor.build_dspy_tools(names)
+
+
+runtime_tool_provider = RuntimeToolProvider()
+
+
+_BINARY_OPERATORS: Dict[type[ast.operator], Callable[[Any, Any], Any]] = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+}
+_UNARY_OPERATORS: Dict[type[ast.unaryop], Callable[[Any], Any]] = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
+
+_MAX_INTEGER_BITS = 4096
+
+
+def _require_bounded_number(value: int | float) -> int | float:
+    if isinstance(value, int) and value.bit_length() > _MAX_INTEGER_BITS:
+        raise ValueError("arithmetic result is too large")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("arithmetic result is not finite")
+    return value
+
+
+def _require_bounded_operation(
+    operation: ast.operator, left: int | float, right: int | float
+) -> None:
+    if not isinstance(left, int) or not isinstance(right, int):
+        return
+    if isinstance(operation, ast.Mult):
+        projected_bits = left.bit_length() + right.bit_length()
+    elif isinstance(operation, ast.Pow) and right >= 0:
+        projected_bits = max(1, left.bit_length()) * right
+    else:
+        return
+    if projected_bits > _MAX_INTEGER_BITS:
+        raise ValueError("arithmetic result is too large")
+
+
+def _evaluate_arithmetic(node: ast.AST) -> int | float:
+    if isinstance(node, ast.Expression):
+        return _evaluate_arithmetic(node.body)
+    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+        return _require_bounded_number(node.value)
+    if isinstance(node, ast.BinOp) and type(node.op) in _BINARY_OPERATORS:
+        left = _evaluate_arithmetic(node.left)
+        right = _evaluate_arithmetic(node.right)
+        if isinstance(node.op, ast.Pow) and abs(right) > 100:
+            raise ValueError("exponent is too large")
+        _require_bounded_operation(node.op, left, right)
+        result = _BINARY_OPERATORS[type(node.op)](left, right)
+        return _require_bounded_number(result)
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPERATORS:
+        result = _UNARY_OPERATORS[type(node.op)](_evaluate_arithmetic(node.operand))
+        return _require_bounded_number(result)
+    raise ValueError("only arithmetic expressions are allowed")
 
 
 def math_eval(expression: str) -> str:
-    """Evaluate a simple Python math expression safely."""
+    """Evaluate an arithmetic expression without executing Python code."""
+    if len(expression) > 500:
+        return "error: expression is too long"
     try:
-        result = eval(expression, {"__builtins__": {}}, {})
-        return str(result)
-    except Exception as e:
-        return f"error: {e}"
+        return str(_evaluate_arithmetic(ast.parse(expression, mode="eval")))
+    except Exception as error:
+        return f"error: {error}"
 
 
 def word_count(text: str) -> str:
@@ -255,84 +276,71 @@ def word_count(text: str) -> str:
 
 
 def ascii_to_png(text: str) -> dspy.Image:
-    """Render ASCII text to PNG for internal analysis.
-
-    Returns a data-URL (base64) image suitable for DSPy Image fields.
-    """
+    """Render ASCII text to a PNG data URL."""
     converter = AsciiToPngConverter(font_size=16, padding=20)
-    img = converter.convert_text_to_image_hq(text, scale_factor=2)
+    image = converter.convert_text_to_image_hq(text, scale_factor=2)
     buffer = BytesIO()
-    img.save(buffer, format="PNG")
-    png_bytes = buffer.getvalue()
-    b64 = base64.b64encode(png_bytes).decode("ascii")
-    tools_logger.info("ascii_to_png", rendered_bytes=len(png_bytes))
-    return dspy.Image(url=f"data:image/png;base64,{b64}")
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return dspy.Image(url=f"data:image/png;base64,{encoded}")
 
 
-def list_files(directory: str) -> str:
-    """Return newline-separated absolute file paths inside a directory.
+def _list_files(policy: FileAccessPolicy) -> Callable[[str], str]:
+    def list_files(directory: str) -> str:
+        """List files immediately inside an allowed directory."""
+        try:
+            base = policy.require(directory)
+            if not base.exists():
+                return f"error: path does not exist: {base}"
+            if base.is_file():
+                return str(base)
+            return "\n".join(
+                str(path.resolve())
+                for path in base.iterdir()
+                if path.is_file() and policy.allows(path)
+            )
+        except Exception as error:
+            return f"error: {error}"
 
-    If `directory` is a file, returns the absolute file path.
-    Expands '~' and resolves relative paths.
-    """
-    try:
-        base = Path(os.path.expanduser(directory)).resolve()
-    except Exception as e:
-        return f"error: {e}"
-
-    if not base.exists():
-        return f"error: path does not exist: {base}"
-    if base.is_file():
-        # sandbox check for file
-        if not registry._in_sandbox(base):  # type: ignore[attr-defined]
-            return f"error: access denied by sandbox: {base}"
-        return str(base)
-
-    try:
-        files = []
-        for p in base.iterdir():
-            if p.is_file():
-                rp = p.resolve()
-                if registry._in_sandbox(rp):  # type: ignore[attr-defined]
-                    files.append(str(rp))
-        return "\n".join(files)
-    except Exception as e:
-        return f"error: {e}"
+    return list_files
 
 
-def read_file_attachment(path: str) -> Attachments:
-    """Return an Attachments object for the given file path.
+def _read_file_attachment(policy: FileAccessPolicy) -> Callable[[str], Attachments]:
+    def read_file_attachment(path: str) -> Attachments:
+        """Return an attachment for an allowed local file."""
+        resolved = policy.require(path)
+        if not resolved.is_file():
+            raise FileNotFoundError(f"File not found: {resolved}")
+        return Attachments(str(resolved))  # type: ignore[call-arg]
 
-    This integrates with DSPy by returning an "Attachments"-typed object that
-    models can consume via signatures that accept Attachments.
-    """
-    p = Path(os.path.expanduser(path)).resolve()
-    # sandbox check
-    if not registry._in_sandbox(p):  # type: ignore[attr-defined]
-        raise PermissionError(f"access denied by sandbox: {p}")
-    if not p.exists() or not p.is_file():
-        raise FileNotFoundError(f"File not found: {p}")
-    return Attachments(str(p))  # type: ignore[call-arg]
+    return read_file_attachment
 
 
-def write_file(path: str, content: str) -> str:
-    """Write text content to a file (UTF-8). Returns absolute path or error."""
-    try:
-        p = Path(os.path.expanduser(path)).resolve()
-        # sandbox check
-        if not registry._in_sandbox(p):  # type: ignore[attr-defined]
-            return f"error: access denied by sandbox: {p}"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
-        return str(p)
-    except Exception as e:
-        return f"error: {e}"
+def _write_file(policy: FileAccessPolicy) -> Callable[[str, str], str]:
+    def write_file(path: str, content: str) -> str:
+        """Write UTF-8 text to an allowed path."""
+        try:
+            resolved = policy.require(path)
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            resolved.write_text(content, encoding="utf-8")
+            return str(resolved)
+        except Exception as error:
+            return f"error: {error}"
+
+    return write_file
 
 
-# Register built-ins
-registry.register("math_eval", math_eval)
-registry.register("word_count", word_count)
-registry.register("ascii_to_png", ascii_to_png)
-registry.register("list_files", list_files)
-registry.register("read_file_attachment", read_file_attachment)
-registry.register("write_file", write_file)
+def _constant_tool(function: Callable[..., Any]) -> ToolFactory:
+    return lambda _policy: function
+
+
+default_catalog = ToolCatalog(
+    {
+        "math_eval": _constant_tool(math_eval),
+        "word_count": _constant_tool(word_count),
+        "ascii_to_png": _constant_tool(ascii_to_png),
+        "list_files": _list_files,
+        "read_file_attachment": _read_file_attachment,
+        "write_file": _write_file,
+    }
+)

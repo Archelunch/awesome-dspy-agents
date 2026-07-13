@@ -1,4 +1,5 @@
 from pathlib import Path
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Optional
 
 import dspy  # type: ignore
@@ -6,15 +7,32 @@ import dspy  # type: ignore
 from awesome_dspy_agents.config import AppConfig, build_lm, load_config
 from awesome_dspy_agents.logging_setup import get_logger
 from awesome_dspy_agents.patterns.interface import AgentPattern
-from awesome_dspy_agents.tools.registry import (registry, reset_current_agent,
-                                                reset_current_iteration,
-                                                set_current_agent,
-                                                set_current_iteration)
+from awesome_dspy_agents.predictor import build_predictor
+from awesome_dspy_agents.runtime import (
+    EmitIteration,
+    IterationEvent,
+    PatternOutcome,
+    PatternRunRequest,
+    PatternRuntime,
+)
+from awesome_dspy_agents.tools.registry import (
+    reset_current_iteration,
+    set_current_iteration,
+)
 
 from .signatures import (AffirmativeDebater, JudgeDiscriminative,
                          JudgeExtractive, NegativeDebater)
 
 llm_logger = get_logger("mad.llm", "llm_calls.log", max_bytes=2_000_000, backup_count=3)
+
+
+@dataclass(frozen=True)
+class DebateExchange:
+    affirmative: str
+    affirmative_reasoning: str
+    negative: str
+    negative_reasoning: str
+    judge_eval: Optional[str] = None
 
 
 class DebaterModule(dspy.Module):
@@ -35,8 +53,6 @@ class DebaterModule(dspy.Module):
         self.debate_level = debate_level
         self.persona = persona
         self.module_type = module_type
-        self.tool_names = tool_names or []
-        self.react_max_iters = react_max_iters
 
         # Select signature based on role
         if role == "affirmative":
@@ -44,29 +60,14 @@ class DebaterModule(dspy.Module):
         else:
             signature = NegativeDebater
 
-        if module_type == "predict":
-            self.predict = dspy.Predict(signature)
-        elif module_type == "chain_of_thought":
-            self.predict = dspy.ChainOfThought(signature)
-        elif module_type == "react":
-            tools = registry.build_dspy_tools(self.tool_names)
-            llm_logger.info(
-                "react_tools", role=self.role, tools=[str(t) for t in tools]
-            )
-            self.predict = dspy.ReAct(
-                signature, tools=tools, max_iters=self.react_max_iters
-            )
-        else:
-            raise ValueError(f"Unsupported module_type: {module_type}")
-
-        # Optionally set a specific LM for this debater
-        if lm is not None:
-            # Set LM for this module and its children
-            try:
-                self.set_lm(lm)
-            except Exception:
-                # Fallback to setting on the predictor only
-                self.predict.set_lm(lm)
+        self.predict = build_predictor(
+            signature,
+            module_type,
+            role=role,
+            lm=lm,
+            tool_names=tool_names,
+            react_max_iters=react_max_iters,
+        )
 
     def get_role_instruction(self) -> str:
         """Get role instruction based on debate level."""
@@ -106,15 +107,12 @@ class DebaterModule(dspy.Module):
                 topic_len=len(debate_topic),
                 history_len=len(debate_history),
             )
-            token = set_current_agent(self.role)
-            out = self.predict(
+            return self.predict(
                 debate_topic=debate_topic,
                 debate_history=debate_history,
                 role_instruction=role_instruction,
                 persona=self.persona,
             )
-            reset_current_agent(token)
-            return out
         else:
             llm_logger.info(
                 "predict",
@@ -123,16 +121,13 @@ class DebaterModule(dspy.Module):
                 topic_len=len(debate_topic),
                 history_len=len(debate_history),
             )
-            token = set_current_agent(self.role)
-            out = self.predict(
+            return self.predict(
                 debate_topic=debate_topic,
                 debate_history=debate_history,
                 affirmative_argument=affirmative_argument,
                 role_instruction=role_instruction,
                 persona=self.persona,
             )
-            reset_current_agent(token)
-            return out
 
 
 class JudgeModule(dspy.Module):
@@ -148,38 +143,23 @@ class JudgeModule(dspy.Module):
     ):
         super().__init__()
         self.module_type = module_type
-        self.tool_names = tool_names or []
-        self.react_max_iters = react_max_iters
 
-        if module_type == "predict":
-            self.discriminative = dspy.Predict(JudgeDiscriminative)
-            self.extractive = dspy.Predict(JudgeExtractive)
-        elif module_type == "chain_of_thought":
-            self.discriminative = dspy.ChainOfThought(JudgeDiscriminative)
-            self.extractive = dspy.ChainOfThought(JudgeExtractive)
-        elif module_type == "react":
-            tools = registry.build_dspy_tools(self.tool_names)
-            llm_logger.info("judge_react_tools", tools=[str(t) for t in tools])
-            self.discriminative = dspy.ReAct(
-                JudgeDiscriminative, tools=tools, max_iters=self.react_max_iters
-            )
-            self.extractive = dspy.ReAct(
-                JudgeExtractive, tools=tools, max_iters=self.react_max_iters
-            )
-        else:
-            raise ValueError(f"Unsupported judge module_type: {module_type}")
-
-        # Optionally set specific LMs for judge sub-modules
-        if lm_discriminative is not None:
-            try:
-                self.discriminative.set_lm(lm_discriminative)
-            except Exception:
-                pass
-        if lm_extractive is not None:
-            try:
-                self.extractive.set_lm(lm_extractive)
-            except Exception:
-                pass
+        self.discriminative = build_predictor(
+            JudgeDiscriminative,
+            module_type,
+            role="judge",
+            lm=lm_discriminative,
+            tool_names=tool_names,
+            react_max_iters=react_max_iters,
+        )
+        self.extractive = build_predictor(
+            JudgeExtractive,
+            module_type,
+            role="judge",
+            lm=lm_extractive,
+            tool_names=tool_names,
+            react_max_iters=react_max_iters,
+        )
 
     def evaluate_debate(
         self,
@@ -238,7 +218,7 @@ class MADFramework(dspy.Module):
         negative_tools: Optional[List[str]] = None,
         react_max_iters: int = 6,
         judge_tool_names: Optional[List[str]] = None,
-        on_iteration: Optional[Callable[[int, Dict[str, Any], str], None]] = None,
+        on_iteration: Optional[EmitIteration] = None,
     ):
         super().__init__()
 
@@ -274,21 +254,19 @@ class MADFramework(dspy.Module):
             react_max_iters=react_max_iters,
         )
 
-        # Debate state
-        self.debate_history: List[Dict[str, Any]] = []
-
-    def format_history(self) -> str:
+    @staticmethod
+    def format_history(history: List[DebateExchange]) -> str:
         """Format debate history as readable text."""
-        if not self.debate_history:
+        if not history:
             return "No debate history yet."
 
         formatted = []
-        for i, exchange in enumerate(self.debate_history, 1):
+        for i, exchange in enumerate(history, 1):
             formatted.append(f"\n--- Iteration {i} ---")
-            formatted.append(f"Affirmative: {exchange['affirmative']}")
-            formatted.append(f"Negative: {exchange['negative']}")
-            if "judge_eval" in exchange:
-                formatted.append(f"Judge: {exchange['judge_eval']}")
+            formatted.append(f"Affirmative: {exchange.affirmative}")
+            formatted.append(f"Negative: {exchange.negative}")
+            if exchange.judge_eval is not None:
+                formatted.append(f"Judge: {exchange.judge_eval}")
 
         return "\n".join(formatted)
 
@@ -297,12 +275,12 @@ class MADFramework(dspy.Module):
         debate_topic: str,
     ):
         """Run complete debate process."""
-        self.debate_history = []
+        history: List[DebateExchange] = []
         solution_found = False
         final_answer = None
 
         for iteration in range(1, self.max_iterations + 1):
-            history_str = self.format_history()
+            history_str = self.format_history(history)
             iter_token = set_current_iteration(iteration)
             try:
                 # Affirmative speaks
@@ -319,62 +297,53 @@ class MADFramework(dspy.Module):
                 )
 
                 # Record exchange
-                exchange = {
-                    "affirmative": aff_response.argument,
-                    "affirmative_reasoning": aff_response.reasoning,
-                    "negative": neg_response.counter_argument,
-                    "negative_reasoning": neg_response.reasoning,
-                }
-                self.debate_history.append(exchange)
+                exchange = DebateExchange(
+                    affirmative=aff_response.argument,
+                    affirmative_reasoning=aff_response.reasoning,
+                    negative=neg_response.counter_argument,
+                    negative_reasoning=neg_response.reasoning,
+                )
+                history.append(exchange)
 
                 # Callback after initial exchange
                 if self.on_iteration is not None:
-                    try:
-                        self.on_iteration(iteration, exchange, self.format_history())
-                    except Exception:
-                        pass
+                    self.on_iteration(
+                        IterationEvent(iteration, exchange, self.format_history(history))
+                    )
 
                 # Judge evaluates
                 if self.adaptive_break:
-                    history_str = self.format_history()
-                    judge_token = set_current_agent("judge")
-                    try:
-                        judge_eval = self.judge.evaluate_debate(
-                            debate_topic=debate_topic,
-                            debate_history=history_str,
-                            current_iteration=iteration,
-                        )
-                    finally:
-                        reset_current_agent(judge_token)
+                    history_str = self.format_history(history)
+                    judge_eval = self.judge.evaluate_debate(
+                        debate_topic=debate_topic,
+                        debate_history=history_str,
+                        current_iteration=iteration,
+                    )
 
-                    exchange["judge_eval"] = judge_eval.reasoning
+                    exchange = replace(exchange, judge_eval=judge_eval.reasoning)
+                    history[-1] = exchange
 
                     # Callback after judge evaluation
                     if self.on_iteration is not None:
-                        try:
-                            self.on_iteration(
-                                iteration, exchange, self.format_history()
+                        self.on_iteration(
+                            IterationEvent(
+                                iteration, exchange, self.format_history(history)
                             )
-                        except Exception:
-                            pass
+                        )
 
                     if judge_eval.solution_found and judge_eval.confidence > 0.7:
                         solution_found = True
-                        judge_token = set_current_agent("judge")
-                        try:
-                            final_answer = self.judge.extract_solution(
-                                debate_topic=debate_topic,
-                                debate_history=history_str,
-                            )
-                        finally:
-                            reset_current_agent(judge_token)
+                        final_answer = self.judge.extract_solution(
+                            debate_topic=debate_topic,
+                            debate_history=history_str,
+                        )
                         break
             finally:
                 reset_current_iteration(iter_token)
 
         # Extract final answer if not found adaptively
         if not solution_found:
-            history_str = self.format_history()
+            history_str = self.format_history(history)
             final_prediction = self.judge.extract_solution(
                 debate_topic=debate_topic,
                 debate_history=history_str,
@@ -385,17 +354,17 @@ class MADFramework(dspy.Module):
             return dspy.Prediction(
                 final_answer="",
                 justification="",
-                debate_history=self.debate_history,
-                iterations_used=len(self.debate_history),
-                adaptive_break_triggered=solution_found,
+                history=history,
+                iterations_used=len(history),
+                stopped_early=solution_found,
             )
 
         return dspy.Prediction(
             final_answer=final_answer.final_answer,
             justification=final_answer.justification,
-            debate_history=self.debate_history,
-            iterations_used=len(self.debate_history),
-            adaptive_break_triggered=solution_found,
+            history=history,
+            iterations_used=len(history),
+            stopped_early=solution_found,
         )
 
 
@@ -408,10 +377,7 @@ class DebatePattern(AgentPattern):
     def describe(self) -> str:
         readme = self._root / "README.md"
         if readme.exists():
-            try:
-                return readme.read_text(encoding="utf-8")
-            except Exception:
-                return "Multi-Agent Debate pattern."
+            return readme.read_text(encoding="utf-8")
         return "Multi-Agent Debate pattern."
 
     def default_config_path(self) -> Optional[Path]:
@@ -434,99 +400,78 @@ class DebatePattern(AgentPattern):
     def available_tools(self) -> List[str]:
         # reflect from default config
         cfg_path = self.default_config_path()
-        try:
-            if cfg_path:
-                cfg = load_config(str(cfg_path))
-                tools = set()
-                aff = cfg.agents.get("affirmative")
-                neg = cfg.agents.get("negative")
-                if aff:
-                    tools.update(aff.tools)
-                if neg:
-                    tools.update(neg.tools)
-                return sorted(tools)
-        except Exception:
-            pass
+        if cfg_path:
+            cfg = load_config(str(cfg_path))
+            tools = set()
+            aff = cfg.agents.get("affirmative")
+            neg = cfg.agents.get("negative")
+            if aff:
+                tools.update(aff.tools)
+            if neg:
+                tools.update(neg.tools)
+            return sorted(tools)
         return []
-
-    def available_scripts(self) -> Dict[str, str]:
-        # Placeholder for optimization scripts discovery later
-        return {}
 
     def run(
         self,
-        topic: str,
-        config_path: Path,
-        overrides: Optional[Dict[str, Any]] = None,
-        on_iteration: Optional[Callable[[int, Dict[str, Any], str], None]] = None,
-    ) -> Dict[str, Any]:
-        cfg: AppConfig = load_config(str(config_path))
+        request: PatternRunRequest,
+        on_iteration: Optional[EmitIteration] = None,
+    ) -> PatternOutcome:
 
-        # apply simple overrides for debate.* keys
-        if overrides:
-            debate_over = overrides.get("debate")
-            if isinstance(debate_over, dict):
-                if "max_iterations" in debate_over:
-                    cfg.debate.max_iterations = int(debate_over["max_iterations"])  # type: ignore[assignment]
-                if "debate_level" in debate_over:
-                    cfg.debate.debate_level = int(debate_over["debate_level"])  # type: ignore[assignment]
-                if "adaptive_break" in debate_over:
-                    cfg.debate.adaptive_break = bool(debate_over["adaptive_break"])  # type: ignore[assignment]
+        def execute(
+            current_request: PatternRunRequest,
+            cfg: AppConfig,
+            emit: Callable[[IterationEvent], None],
+        ) -> PatternOutcome:
+            aff_cfg = cfg.agents.get("affirmative")
+            neg_cfg = cfg.agents.get("negative")
+            framework = MADFramework(
+                max_iterations=cfg.debate.max_iterations,
+                debate_level=cfg.debate.debate_level,
+                adaptive_break=cfg.debate.adaptive_break,
+                affirmative_persona=(aff_cfg.persona if aff_cfg else ""),
+                negative_persona=(neg_cfg.persona if neg_cfg else ""),
+                affirmative_lm=(
+                    build_lm(aff_cfg.lm) if aff_cfg and aff_cfg.lm else None
+                ),
+                negative_lm=(
+                    build_lm(neg_cfg.lm) if neg_cfg and neg_cfg.lm else None
+                ),
+                judge_lm_discriminative=(
+                    build_lm(cfg.judge.discriminative_lm)
+                    if cfg.judge.discriminative_lm
+                    else None
+                ),
+                judge_lm_extractive=(
+                    build_lm(cfg.judge.extractive_lm)
+                    if cfg.judge.extractive_lm
+                    else None
+                ),
+                affirmative_module_type=(
+                    aff_cfg.module_type if aff_cfg else "predict"
+                ),
+                negative_module_type=(neg_cfg.module_type if neg_cfg else "predict"),
+                judge_module_type=cfg.judge.module_type,
+                affirmative_tools=(aff_cfg.tools if aff_cfg else []),
+                negative_tools=(neg_cfg.tools if neg_cfg else []),
+                judge_tool_names=cfg.judge.tools,
+                on_iteration=emit,
+            )
+            final = framework(debate_topic=current_request.topic)
+            return PatternOutcome(
+                final_answer=final.final_answer,
+                justification=final.justification,
+                iterations_used=final.iterations_used,
+                stopped_early=final.stopped_early,
+                history=final.history,
+            )
 
-        # Configure default lm if provided
-        if cfg.default_lm is not None:
-            dspy.configure(lm=build_lm(cfg.default_lm))
-
-        # Build per-agent LMs
-        aff_cfg = cfg.agents.get("affirmative")
-        neg_cfg = cfg.agents.get("negative")
-
-        aff_lm = build_lm(aff_cfg.lm) if aff_cfg and aff_cfg.lm else None
-        neg_lm = build_lm(neg_cfg.lm) if neg_cfg and neg_cfg.lm else None
-
-        judge_disc_lm = (
-            build_lm(cfg.judge.discriminative_lm)
-            if cfg.judge.discriminative_lm
-            else None
+        return PatternRuntime().run_configured(
+            request,
+            execute=execute,
+            on_iteration=on_iteration,
+            base_config_path=self.default_config_path(),
         )
-        judge_ext_lm = (
-            build_lm(cfg.judge.extractive_lm) if cfg.judge.extractive_lm else None
-        )
-
-        # Create framework
-        framework = MADFramework(
-            max_iterations=cfg.debate.max_iterations,
-            debate_level=cfg.debate.debate_level,
-            adaptive_break=cfg.debate.adaptive_break,
-            affirmative_persona=(aff_cfg.persona if aff_cfg else ""),
-            negative_persona=(neg_cfg.persona if neg_cfg else ""),
-            affirmative_lm=aff_lm,
-            negative_lm=neg_lm,
-            judge_lm_discriminative=judge_disc_lm,
-            judge_lm_extractive=judge_ext_lm,
-            affirmative_module_type=(aff_cfg.module_type if aff_cfg else "predict"),
-            negative_module_type=(neg_cfg.module_type if neg_cfg else "predict"),
-            judge_module_type=cfg.judge.module_type,
-            affirmative_tools=(aff_cfg.tools if aff_cfg else []),
-            negative_tools=(neg_cfg.tools if neg_cfg else []),
-            judge_tool_names=(
-                cfg.judge.tools if getattr(cfg.judge, "tools", None) is not None else []
-            ),
-        )
-
-        # attach iteration callback
-        if on_iteration is not None:
-            framework.on_iteration = on_iteration
-
-        final = framework(debate_topic=topic)
-
-        return {
-            "final_answer": final.final_answer,
-            "justification": final.justification,
-            "iterations_used": final.iterations_used,
-            "adaptive_break_triggered": final.adaptive_break_triggered,
-            "history": final.debate_history,
-        }
 
 
 def get_pattern() -> AgentPattern:

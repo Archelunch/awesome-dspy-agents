@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Optional, Protocol
+from typing import Dict, Iterable, Optional, Protocol
+
+from awesome_dspy_agents.runtime import EmitIteration, PatternOutcome, PatternRunRequest
 
 
 class AgentPattern(Protocol):
@@ -25,24 +28,31 @@ class AgentPattern(Protocol):
         """Return a list of tool names this pattern uses by default (if any)."""
         ...
 
-    def available_scripts(self) -> Dict[str, str]:
-        """Return mapping of script-name -> description for optimization/eval scripts."""
-        ...
-
     def run(
         self,
-        topic: str,
-        config_path: Path,
-        overrides: Optional[Dict[str, Any]] = None,
-        on_iteration: Optional[Callable[[int, Dict[str, Any], str], None]] = None,
-    ) -> Dict[str, Any]:
-        """Execute the pattern and return a machine-friendly summary of results."""
+        request: PatternRunRequest,
+        on_iteration: Optional[EmitIteration] = None,
+    ) -> PatternOutcome:
+        """Execute one Pattern run."""
         ...
 
 
-def find_patterns(root: Path) -> Dict[str, AgentPattern]:
-    """Scan `root` for pattern packages exposing get_pattern()."""
+@dataclass(frozen=True)
+class DiscoveryIssue:
+    pattern: str
+    message: str
+
+
+@dataclass(frozen=True)
+class PatternCatalog:
+    patterns: Dict[str, AgentPattern] = field(default_factory=dict)
+    issues: tuple[DiscoveryIssue, ...] = ()
+
+
+def discover_patterns(root: Path) -> PatternCatalog:
+    """Discover Pattern adapters and retain every discovery failure."""
     patterns: Dict[str, AgentPattern] = {}
+    issues = []
     for entry in root.iterdir():
         if not entry.is_dir():
             continue
@@ -55,10 +65,21 @@ def find_patterns(root: Path) -> Dict[str, AgentPattern]:
             mod = __import__(module_name, fromlist=["get_pattern"])  # type: ignore
             get_pattern = getattr(mod, "get_pattern", None)
             if get_pattern is None:
+                issues.append(DiscoveryIssue(entry.name, "get_pattern() is missing"))
                 continue
             pattern: AgentPattern = get_pattern()
-            patterns[entry.name] = pattern
-        except Exception:
-            # Skip broken patterns; CLI can show warnings later
-            continue
-    return patterns
+            if pattern.name != entry.name:
+                issues.append(
+                    DiscoveryIssue(
+                        entry.name,
+                        f"declared name '{pattern.name}' does not match directory",
+                    )
+                )
+                continue
+            if pattern.name in patterns:
+                issues.append(DiscoveryIssue(entry.name, "duplicate Pattern name"))
+                continue
+            patterns[pattern.name] = pattern
+        except Exception as error:
+            issues.append(DiscoveryIssue(entry.name, f"{type(error).__name__}: {error}"))
+    return PatternCatalog(patterns, tuple(issues))
