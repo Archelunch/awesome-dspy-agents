@@ -68,7 +68,7 @@ A collection of multi-agent systems implemented with the [DSPy](https://github.c
     - [Project layout](#project-layout)
     - [Common practices](#common-practices)
     - [Adding a new pattern](#adding-a-new-pattern)
-    - [Adding tools to the global registry](#adding-tools-to-the-global-registry)
+    - [Adding tools to the catalog](#adding-tools-to-the-catalog)
     - [Configuration](#configuration-1)
     - [Observability \& logs](#observability--logs)
     - [Roadmap ideas](#roadmap-ideas)
@@ -91,7 +91,8 @@ Encouraging Divergent Thinking in Large Language Models through Multi-Agent Deba
 
 ### Available Tools
 
-Tools are available to ReAct modules across patterns via a shared registry. List tools and inspect details:
+Tools are built per Pattern run from a shared catalog. File access is denied unless
+explicit roots are provided with `--allow-path`. List tools and inspect details:
 
 ```bash
 poetry run dspy-agents tools
@@ -300,8 +301,11 @@ This section documents how to extend and maintain the CLI and pattern ecosystem.
 awesome_dspy_agents/
   cli.py                       # CLI entrypoint (Typer + Rich)
   config.py                    # AppConfig and LM settings
+  runtime.py                   # Typed Pattern run lifecycle
+  predictor.py                 # DSPy predictor construction and agent context
+  evaluation.py                # Datasets, metrics, reports, and optimization
   tools/
-    registry.py                # Global tool registry (shared for all patterns)
+    registry.py                # Tool catalog, per-run executor, and file policy
     ascii_to_png.py            # Example image tool
   patterns/
     interface.py               # AgentPattern protocol and discovery
@@ -334,34 +338,41 @@ awesome_dspy_agents/
      - `default_config_path(self) -> Path | None`
      - `available_configs(self) -> Iterable[Path]`: include default + optional `scenarios/*.yaml`
      - `available_tools(self) -> Iterable[str]`: the tool names used by default
-     - `available_scripts(self) -> dict[str, str]`: mapping of script name to description (MIPRO/GEPA)
-     - `run(self, topic, config_path, overrides=None, on_iteration=None) -> dict`
-       - Configure default LM if provided; construct your DSPy program; call `on_iteration` after each step.
+     - `run(self, request: PatternRunRequest, on_iteration: EmitIteration | None = None) -> PatternOutcome`
+       - Execute through `PatternRuntime`; emit typed `IterationEvent` values after each step.
    - `def get_pattern() -> AgentPattern: return YourPattern()`
-3. The CLI will discover it automatically via `find_patterns()` if `pattern.py` exports `get_pattern()`.
+3. The CLI will discover it automatically via `discover_patterns()` if `pattern.py` exports `get_pattern()`.
 
 Example `run` implementation sketch:
 
 ```python
-def run(self, topic, config_path, overrides=None, on_iteration=None):
-    cfg = load_config(str(config_path))
-    if cfg.default_lm:
-        dspy.configure(lm=build_lm(cfg.default_lm))
-    # build modules based on cfg; call on_iteration(i, exchange, history)
-    final = program(...)
-    return {"final_answer": final.final_answer, "justification": final.justification}
+def run(self, request: PatternRunRequest, on_iteration=None) -> PatternOutcome:
+    def execute(request, cfg, emit):
+        program = build_program(cfg, on_iteration=emit)
+        final = program(topic=request.topic)
+        return PatternOutcome(
+            final_answer=final.final_answer,
+            justification=final.justification,
+            iterations_used=final.iterations_used,
+            stopped_early=final.stopped_early,
+            history=final.history,
+        )
+
+    return PatternRuntime().run_configured(
+        request, execute=execute, on_iteration=on_iteration
+    )
 ```
 
-### Adding tools to the global registry
+### Adding tools to the catalog
 1. Implement a pure function in `awesome_dspy_agents/tools/*.py`.
-2. Register it in `awesome_dspy_agents/tools/registry.py`:
+2. Add it to `default_catalog` in `awesome_dspy_agents/tools/registry.py`:
 ```python
-from awesome_dspy_agents.tools.registry import registry
+from awesome_dspy_agents.tools.registry import default_catalog
 
 def my_tool(arg1: str) -> str:
     return arg1.upper()
 
-registry.register("my_tool", my_tool)
+default_catalog.register("my_tool", lambda _policy: my_tool)
 ```
 3. Reference the tool by name in pattern configs (for ReAct tools) or in code:
 ```yaml
@@ -388,12 +399,11 @@ Guidelines:
 - [x] Add Addition-by-Subtraction pattern
 - [x] Add tools
 - [ ] Add MAPS pattern
-- [ ] Optional token streaming via `dspy.streamify` with a `--stream` flag.
-- [ ] Built-in optimization scripts (MIPRO/GEPA) surfaced in `scripts` command.
+- [x] Versioned evaluation datasets, metrics, and optimizer seam
 - [ ] Integration with MLFlow
-- [ ] Session profiles (token counts, latency) and `--profile` flag.
+- [x] Evaluation profiles for token counts, cost, and latency
 - [ ] Batch runs (`run-batch --topics file.txt --concurrency N`).
-- [ ] Add tests
+- [x] Add deterministic tests
 - [ ] More examples
 - [ ] More tools
 - [ ] Improve agents communication 

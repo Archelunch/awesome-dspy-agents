@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 class LMSettings(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     provider: str = Field(description="Provider namespace for DSPy LM, e.g., 'openai'")
     model: str = Field(description="Model name, e.g., 'gpt-4o-mini'")
@@ -29,7 +29,7 @@ class LMSettings(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     persona: str = Field(
         default="", description="Persona prompt that shapes agent behavior"
@@ -39,12 +39,12 @@ class AgentConfig(BaseModel):
         default="predict", description="Which DSPy module to use for this agent"
     )
     tools: List[str] = Field(
-        default_factory=list, description="Names of tools from registry for ReAct"
+        default_factory=list, description="Names of tools from the catalog for ReAct"
     )
 
 
 class JudgeConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     discriminative_lm: Optional[LMSettings] = None
     extractive_lm: Optional[LMSettings] = None
@@ -52,12 +52,12 @@ class JudgeConfig(BaseModel):
         default="predict", description="Judge mode for discriminative/extractive"
     )
     tools: List[str] = Field(
-        default_factory=list, description="Names of tools from registry for Judge ReAct"
+        default_factory=list, description="Names of tools from the catalog for Judge ReAct"
     )
 
 
 class DebateConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     max_iterations: int = Field(default=3, ge=1)
     debate_level: int = Field(default=2, ge=0, le=3)
@@ -65,14 +65,14 @@ class DebateConfig(BaseModel):
 
 
 class AbsConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     max_iterations: int = Field(default=2, ge=1)
     early_exit: bool = True
 
 
 class AppConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     default_lm: Optional[LMSettings] = None
     agents: Dict[str, AgentConfig] = Field(default_factory=dict)
@@ -105,10 +105,7 @@ def _expand_env_vars_in_data(value: Any) -> Any:
     if isinstance(value, list):
         return [_expand_env_vars_in_data(v) for v in value]
     if isinstance(value, str):
-        try:
-            return os.path.expandvars(value)
-        except Exception:
-            return value
+        return os.path.expandvars(value)
     return value
 
 
@@ -125,9 +122,26 @@ def _read_yaml(path: str) -> Dict[str, Any]:
         return _expand_env_vars_in_data(data)
 
 
-def load_config(path: str) -> AppConfig:
+def merge_config_layers(
+    base: Dict[str, Any], overrides: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Recursively merge mappings; lists and scalar values replace."""
+    merged = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_config_layers(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_config(
+    path: str, overrides: Optional[Dict[str, Any]] = None
+) -> AppConfig:
     data = _read_yaml(path)
+    if overrides:
+        data = merge_config_layers(data, overrides)
     try:
-        return AppConfig(**data)
+        return AppConfig.model_validate(data)
     except ValidationError as ve:
-        raise RuntimeError(f"Invalid configuration file: {ve}")
+        raise RuntimeError(f"Invalid configuration file: {ve}") from ve

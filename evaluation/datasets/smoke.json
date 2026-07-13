@@ -1,0 +1,11 @@
+{
+  "name": "smoke",
+  "version": 1,
+  "examples": [
+    {
+      "inputs": {"question": "What is 2 + 2?"},
+      "expected": {"answer": "4"},
+      "metadata": {"category": "arithmetic"}
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 import dspy  # type: ignore
@@ -6,14 +7,30 @@ import dspy  # type: ignore
 from awesome_dspy_agents.config import AppConfig, build_lm, load_config
 from awesome_dspy_agents.logging_setup import get_logger
 from awesome_dspy_agents.patterns.interface import AgentPattern
-from awesome_dspy_agents.tools.registry import (registry, reset_current_agent,
-                                                reset_current_iteration,
-                                                set_current_agent,
-                                                set_current_iteration)
+from awesome_dspy_agents.predictor import build_predictor
+from awesome_dspy_agents.runtime import (
+    EmitIteration,
+    IterationEvent,
+    PatternOutcome,
+    PatternRunRequest,
+    PatternRuntime,
+)
+from awesome_dspy_agents.tools.registry import (
+    reset_current_iteration,
+    set_current_iteration,
+)
 
 from .signatures import AdditionAgentSignature, SubtractionAgentSignature
 
 llm_logger = get_logger("mad.llm", "llm_calls.log", max_bytes=2_000_000, backup_count=3)
+
+
+@dataclass(frozen=True)
+class AdditionBySubtractionExchange:
+    addition: str
+    addition_reasoning: str
+    subtraction: str
+    feedback: str
 
 
 class AdditionModule(dspy.Module):
@@ -28,29 +45,15 @@ class AdditionModule(dspy.Module):
         super().__init__()
         self.persona = persona
         self.module_type = module_type
-        self.tool_names = tool_names or []
-        self.react_max_iters = react_max_iters
 
-        if module_type == "predict":
-            self.predict = dspy.Predict(AdditionAgentSignature)
-        elif module_type == "chain_of_thought":
-            self.predict = dspy.ChainOfThought(AdditionAgentSignature)
-        elif module_type == "react":
-            tools = registry.build_dspy_tools(self.tool_names)
-            llm_logger.info(
-                "abs_react_tools", role="addition", tools=[str(t) for t in tools]
-            )
-            self.predict = dspy.ReAct(
-                AdditionAgentSignature, tools=tools, max_iters=self.react_max_iters
-            )
-        else:
-            raise ValueError(f"Unsupported module_type: {module_type}")
-
-        if lm is not None:
-            try:
-                self.set_lm(lm)
-            except Exception:
-                self.predict.set_lm(lm)
+        self.predict = build_predictor(
+            AdditionAgentSignature,
+            module_type,
+            role="addition",
+            lm=lm,
+            tool_names=tool_names,
+            react_max_iters=react_max_iters,
+        )
 
     def forward(self, context: str, instruction: str, history: str):
         llm_logger.info(
@@ -60,17 +63,12 @@ class AdditionModule(dspy.Module):
             ctx_len=len(context),
             hist_len=len(history),
         )
-        token = set_current_agent("addition")
-        try:
-            out = self.predict(
-                context=context,
-                instruction=instruction,
-                history=history,
-                persona=self.persona,
-            )
-        finally:
-            reset_current_agent(token)
-        return out
+        return self.predict(
+            context=context,
+            instruction=instruction,
+            history=history,
+            persona=self.persona,
+        )
 
 
 class SubtractionModule(dspy.Module):
@@ -85,29 +83,15 @@ class SubtractionModule(dspy.Module):
         super().__init__()
         self.persona = persona
         self.module_type = module_type
-        self.tool_names = tool_names or []
-        self.react_max_iters = react_max_iters
 
-        if module_type == "predict":
-            self.predict = dspy.Predict(SubtractionAgentSignature)
-        elif module_type == "chain_of_thought":
-            self.predict = dspy.ChainOfThought(SubtractionAgentSignature)
-        elif module_type == "react":
-            tools = registry.build_dspy_tools(self.tool_names)
-            llm_logger.info(
-                "abs_react_tools", role="subtraction", tools=[str(t) for t in tools]
-            )
-            self.predict = dspy.ReAct(
-                SubtractionAgentSignature, tools=tools, max_iters=self.react_max_iters
-            )
-        else:
-            raise ValueError(f"Unsupported module_type: {module_type}")
-
-        if lm is not None:
-            try:
-                self.set_lm(lm)
-            except Exception:
-                self.predict.set_lm(lm)
+        self.predict = build_predictor(
+            SubtractionAgentSignature,
+            module_type,
+            role="subtraction",
+            lm=lm,
+            tool_names=tool_names,
+            react_max_iters=react_max_iters,
+        )
 
     def forward(
         self, context: str, instruction: str, history: str, candidate_response: str
@@ -119,18 +103,13 @@ class SubtractionModule(dspy.Module):
             ctx_len=len(context),
             hist_len=len(history),
         )
-        token = set_current_agent("subtraction")
-        try:
-            out = self.predict(
-                context=context,
-                instruction=instruction,
-                history=history,
-                candidate_response=candidate_response,
-                persona=self.persona,
-            )
-        finally:
-            reset_current_agent(token)
-        return out
+        return self.predict(
+            context=context,
+            instruction=instruction,
+            history=history,
+            candidate_response=candidate_response,
+            persona=self.persona,
+        )
 
 
 class ABSFramework(dspy.Module):
@@ -149,7 +128,7 @@ class ABSFramework(dspy.Module):
         addition_tools: Optional[List[str]] = None,
         subtraction_tools: Optional[List[str]] = None,
         react_max_iters: int = 6,
-        on_iteration: Optional[Callable[[int, Dict[str, Any], str], None]] = None,
+        on_iteration: Optional[EmitIteration] = None,
     ):
         super().__init__()
         self.max_iterations = max_iterations
@@ -171,32 +150,28 @@ class ABSFramework(dspy.Module):
             react_max_iters=react_max_iters,
         )
 
-        self.history: List[Dict[str, Any]] = []
-
-    def format_history(self) -> str:
-        if not self.history:
+    @staticmethod
+    def format_history(history: List[AdditionBySubtractionExchange]) -> str:
+        if not history:
             return "No conversation yet."
         formatted = []
-        for i, ex in enumerate(self.history, 1):
+        for i, exchange in enumerate(history, 1):
             formatted.append(f"\n--- Iteration {i} ---")
-            if "addition" in ex:
-                formatted.append(f"Addition: {ex['addition']}")
-            if "subtraction" in ex:
-                formatted.append(f"Subtraction: {ex['subtraction']}")
-            if "feedback" in ex:
-                formatted.append(f"Feedback: {ex['feedback']}")
+            formatted.append(f"Addition: {exchange.addition}")
+            formatted.append(f"Subtraction: {exchange.subtraction}")
+            formatted.append(f"Feedback: {exchange.feedback}")
         return "\n".join(formatted)
 
     def forward(self, context: str, instruction: str):
-        self.history = []
+        history: List[AdditionBySubtractionExchange] = []
         final_response = ""
 
         H_context = context
         H_instruction = instruction
 
-        prev_R = None
+        previous_refined_response: Optional[str] = None
         for iteration in range(1, self.max_iterations + 1):
-            hist_str = self.format_history()
+            hist_str = self.format_history(history)
             iter_token = set_current_iteration(iteration)
             try:
                 # Addition produces candidate
@@ -212,48 +187,46 @@ class ABSFramework(dspy.Module):
                     candidate_response=add_out.candidate_response,
                 )
 
-                exchange = {
-                    "addition": add_out.candidate_response,
-                    "addition_reasoning": add_out.reasoning,
-                    "subtraction": sub_out.refined_response,
-                    "feedback": sub_out.feedback,
-                }
-                self.history.append(exchange)
+                exchange = AdditionBySubtractionExchange(
+                    addition=add_out.candidate_response,
+                    addition_reasoning=add_out.reasoning,
+                    subtraction=sub_out.refined_response,
+                    feedback=sub_out.feedback,
+                )
+                history.append(exchange)
 
                 # callback for TUI
                 if self.on_iteration is not None:
-                    try:
-                        self.on_iteration(iteration, exchange, self.format_history())
-                    except Exception:
-                        pass
+                    self.on_iteration(
+                        IterationEvent(iteration, exchange, self.format_history(history))
+                    )
 
                 # Early exit if no changes
                 if (
-                    prev_R is not None
-                    and prev_R.strip() == add_out.candidate_response.strip()
+                    previous_refined_response is not None
+                    and previous_refined_response.strip()
+                    == sub_out.refined_response.strip()
                     and self.early_exit
                 ):
-                    final_response = add_out.candidate_response
+                    final_response = sub_out.refined_response
                     break
 
-                prev_R = add_out.candidate_response
+                previous_refined_response = sub_out.refined_response
                 H_context = context
                 H_instruction = instruction
             finally:
                 reset_current_iteration(iter_token)
 
         # Final output: prefer last refined response if exists, else last candidate
-        if self.history:
-            last = self.history[-1]
-            final_response = last.get("subtraction") or last.get("addition") or ""
+        if history:
+            final_response = history[-1].subtraction or history[-1].addition
 
         return dspy.Prediction(
             final_answer=final_response,
             justification="Refined via Addition-by-Subtraction iterative collaboration.",
-            history=self.history,
-            iterations_used=len(self.history),
-            adaptive_break_triggered=self.early_exit
-            and len(self.history) < self.max_iterations,
+            history=history,
+            iterations_used=len(history),
+            stopped_early=self.early_exit and len(history) < self.max_iterations,
         )
 
 
@@ -266,10 +239,7 @@ class AdditionBySubtractionPattern(AgentPattern):
     def describe(self) -> str:
         readme = self._root / "README.md"
         if readme.exists():
-            try:
-                return readme.read_text(encoding="utf-8")
-            except Exception:
-                return "Addition-by-Subtraction collaboration pattern."
+            return readme.read_text(encoding="utf-8")
         return "Addition-by-Subtraction collaboration pattern."
 
     def default_config_path(self) -> Optional[Path]:
@@ -289,78 +259,66 @@ class AdditionBySubtractionPattern(AgentPattern):
 
     def available_tools(self) -> List[str]:
         cfg_path = self.default_config_path()
-        try:
-            if cfg_path:
-                cfg = load_config(str(cfg_path))
-                tools = set()
-                add = cfg.agents.get("addition")
-                sub = cfg.agents.get("subtraction")
-                if add:
-                    tools.update(add.tools)
-                if sub:
-                    tools.update(sub.tools)
-                return sorted(tools)
-        except Exception:
-            pass
+        if cfg_path:
+            cfg = load_config(str(cfg_path))
+            tools = set()
+            add = cfg.agents.get("addition")
+            sub = cfg.agents.get("subtraction")
+            if add:
+                tools.update(add.tools)
+            if sub:
+                tools.update(sub.tools)
+            return sorted(tools)
         return []
-
-    def available_scripts(self) -> Dict[str, str]:
-        return {}
 
     def run(
         self,
-        topic: str,
-        config_path: Path,
-        overrides: Optional[Dict[str, Any]] = None,
-        on_iteration: Optional[Callable[[int, Dict[str, Any], str], None]] = None,
-    ) -> Dict[str, Any]:
-        # In ABS, interpret topic as the instruction; allow empty context by default
-        cfg: AppConfig = load_config(str(config_path))
+        request: PatternRunRequest,
+        on_iteration: Optional[EmitIteration] = None,
+    ) -> PatternOutcome:
 
-        # Apply overrides for abs.* keys optionally
-        if overrides:
-            abs_over = overrides.get("abs")
-            if isinstance(abs_over, dict):
-                if "max_iterations" in abs_over:
-                    cfg.abs.max_iterations = int(abs_over["max_iterations"])  # type: ignore[assignment]
-                if "early_exit" in abs_over:
-                    cfg.abs.early_exit = bool(abs_over["early_exit"])  # type: ignore[assignment]
+        def execute(
+            current_request: PatternRunRequest,
+            cfg: AppConfig,
+            emit: Callable[[IterationEvent], None],
+        ) -> PatternOutcome:
+            add_cfg = cfg.agents.get("addition")
+            sub_cfg = cfg.agents.get("subtraction")
+            framework = ABSFramework(
+                max_iterations=cfg.abs.max_iterations,
+                early_exit=cfg.abs.early_exit,
+                addition_persona=(add_cfg.persona if add_cfg else ""),
+                subtraction_persona=(sub_cfg.persona if sub_cfg else ""),
+                addition_lm=(
+                    build_lm(add_cfg.lm) if add_cfg and add_cfg.lm else None
+                ),
+                subtraction_lm=(
+                    build_lm(sub_cfg.lm) if sub_cfg and sub_cfg.lm else None
+                ),
+                addition_module_type=(
+                    add_cfg.module_type if add_cfg else "predict"
+                ),
+                subtraction_module_type=(
+                    sub_cfg.module_type if sub_cfg else "predict"
+                ),
+                addition_tools=(add_cfg.tools if add_cfg else []),
+                subtraction_tools=(sub_cfg.tools if sub_cfg else []),
+                on_iteration=emit,
+            )
+            final = framework(context="", instruction=current_request.topic)
+            return PatternOutcome(
+                final_answer=final.final_answer,
+                justification=final.justification,
+                iterations_used=final.iterations_used,
+                stopped_early=final.stopped_early,
+                history=final.history,
+            )
 
-        if cfg.default_lm is not None:
-            dspy.configure(lm=build_lm(cfg.default_lm))
-
-        add_cfg = cfg.agents.get("addition")
-        sub_cfg = cfg.agents.get("subtraction")
-
-        add_lm = build_lm(add_cfg.lm) if add_cfg and add_cfg.lm else None
-        sub_lm = build_lm(sub_cfg.lm) if sub_cfg and sub_cfg.lm else None
-
-        framework = ABSFramework(
-            max_iterations=cfg.abs.max_iterations,
-            early_exit=cfg.abs.early_exit,
-            addition_persona=(add_cfg.persona if add_cfg else ""),
-            subtraction_persona=(sub_cfg.persona if sub_cfg else ""),
-            addition_lm=add_lm,
-            subtraction_lm=sub_lm,
-            addition_module_type=(add_cfg.module_type if add_cfg else "predict"),
-            subtraction_module_type=(sub_cfg.module_type if sub_cfg else "predict"),
-            addition_tools=(add_cfg.tools if add_cfg else []),
-            subtraction_tools=(sub_cfg.tools if sub_cfg else []),
+        return PatternRuntime().run_configured(
+            request,
+            execute=execute,
+            on_iteration=on_iteration,
         )
-
-        if on_iteration is not None:
-            framework.on_iteration = on_iteration
-
-        # For simplicity, treat topic as instruction; context is empty
-        final = framework(context="", instruction=topic)
-
-        return {
-            "final_answer": final.final_answer,
-            "justification": final.justification,
-            "iterations_used": final.iterations_used,
-            "adaptive_break_triggered": final.adaptive_break_triggered,
-            "history": final.history,
-        }
 
 
 def get_pattern() -> AgentPattern:
