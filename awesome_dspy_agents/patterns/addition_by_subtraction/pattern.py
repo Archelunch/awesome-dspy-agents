@@ -318,6 +318,7 @@ class AdditionBySubtractionPattern(AgentPattern):
             request,
             execute=execute,
             on_iteration=on_iteration,
+            base_config_path=self.default_config_path(),
         )
 
 

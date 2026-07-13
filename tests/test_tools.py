@@ -52,6 +52,11 @@ class ToolSecurityTests(unittest.TestCase):
         self.assertEqual(math_eval("2 + 3 * 4"), "14")
         self.assertIn("only arithmetic", math_eval("__import__('os').getcwd()"))
 
+    def test_math_eval_rejects_oversized_intermediate_results(self) -> None:
+        result = math_eval("((9**100)**100)**100")
+
+        self.assertEqual(result, "error: arithmetic result is too large")
+
     def test_executors_do_not_share_file_permissions(self) -> None:
         allowed = ToolExecutor(
             default_catalog, FileAccessPolicy.from_paths([self.root])

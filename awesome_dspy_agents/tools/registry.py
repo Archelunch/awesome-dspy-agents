@@ -6,6 +6,7 @@ import ast
 import base64
 import inspect
 import logging
+import math
 import operator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -214,20 +215,48 @@ _UNARY_OPERATORS: Dict[type[ast.unaryop], Callable[[Any], Any]] = {
     ast.USub: operator.neg,
 }
 
+_MAX_INTEGER_BITS = 4096
+
+
+def _require_bounded_number(value: int | float) -> int | float:
+    if isinstance(value, int) and value.bit_length() > _MAX_INTEGER_BITS:
+        raise ValueError("arithmetic result is too large")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("arithmetic result is not finite")
+    return value
+
+
+def _require_bounded_operation(
+    operation: ast.operator, left: int | float, right: int | float
+) -> None:
+    if not isinstance(left, int) or not isinstance(right, int):
+        return
+    if isinstance(operation, ast.Mult):
+        projected_bits = left.bit_length() + right.bit_length()
+    elif isinstance(operation, ast.Pow) and right >= 0:
+        projected_bits = max(1, left.bit_length()) * right
+    else:
+        return
+    if projected_bits > _MAX_INTEGER_BITS:
+        raise ValueError("arithmetic result is too large")
+
 
 def _evaluate_arithmetic(node: ast.AST) -> int | float:
     if isinstance(node, ast.Expression):
         return _evaluate_arithmetic(node.body)
     if isinstance(node, ast.Constant) and type(node.value) in (int, float):
-        return node.value
+        return _require_bounded_number(node.value)
     if isinstance(node, ast.BinOp) and type(node.op) in _BINARY_OPERATORS:
         left = _evaluate_arithmetic(node.left)
         right = _evaluate_arithmetic(node.right)
         if isinstance(node.op, ast.Pow) and abs(right) > 100:
             raise ValueError("exponent is too large")
-        return _BINARY_OPERATORS[type(node.op)](left, right)
+        _require_bounded_operation(node.op, left, right)
+        result = _BINARY_OPERATORS[type(node.op)](left, right)
+        return _require_bounded_number(result)
     if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPERATORS:
-        return _UNARY_OPERATORS[type(node.op)](_evaluate_arithmetic(node.operand))
+        result = _UNARY_OPERATORS[type(node.op)](_evaluate_arithmetic(node.operand))
+        return _require_bounded_number(result)
     raise ValueError("only arithmetic expressions are allowed")
 
 

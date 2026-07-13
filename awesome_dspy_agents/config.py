@@ -1,5 +1,6 @@
 # pyright: reportMissingTypeStubs=false
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
 import dspy
@@ -136,9 +137,14 @@ def merge_config_layers(
 
 
 def load_config(
-    path: str, overrides: Optional[Dict[str, Any]] = None
+    path: str,
+    overrides: Optional[Dict[str, Any]] = None,
+    *,
+    base_path: Optional[str] = None,
 ) -> AppConfig:
     data = _read_yaml(path)
+    if base_path is not None and Path(base_path).resolve() != Path(path).resolve():
+        data = merge_config_layers(_read_yaml(base_path), data)
     if overrides:
         data = merge_config_layers(data, overrides)
     try:

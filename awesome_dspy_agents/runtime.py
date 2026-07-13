@@ -122,10 +122,15 @@ class PatternRuntime:
         *,
         execute: ExecuteConfiguredPattern,
         on_iteration: Optional[EmitIteration] = None,
+        base_config_path: Optional[Path] = None,
     ) -> PatternOutcome:
         """Validate configuration, scope its default LM, and execute a Pattern."""
 
-        config = load_config(str(request.config_path), dict(request.overrides))
+        config = load_config(
+            str(request.config_path),
+            dict(request.overrides),
+            base_path=str(base_config_path) if base_config_path is not None else None,
+        )
         lm = build_lm(config.default_lm) if config.default_lm is not None else None
         return self.run(
             request,
