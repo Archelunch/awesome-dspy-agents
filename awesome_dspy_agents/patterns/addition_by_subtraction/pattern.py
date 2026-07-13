@@ -7,6 +7,10 @@ import dspy  # type: ignore
 from awesome_dspy_agents.config import AppConfig, build_lm, load_config
 from awesome_dspy_agents.logging_setup import get_logger
 from awesome_dspy_agents.mlflow_integration import mlflow_span
+from awesome_dspy_agents.patterns.deliberation import (
+    DeliberationDelta,
+    DeliberationTrajectory,
+)
 from awesome_dspy_agents.patterns.interface import AgentPattern
 from awesome_dspy_agents.predictor import build_predictor
 from awesome_dspy_agents.runtime import (
@@ -32,6 +36,10 @@ class AdditionBySubtractionExchange:
     addition_reasoning: str
     subtraction: str
     feedback: str
+    additions: tuple[str, ...] = ()
+    removals: tuple[str, ...] = ()
+    removal_reasons: tuple[str, ...] = ()
+    preserved_facts: tuple[str, ...] = ()
 
 
 class AdditionModule(dspy.Module):
@@ -56,7 +64,14 @@ class AdditionModule(dspy.Module):
             react_max_iters=react_max_iters,
         )
 
-    def forward(self, context: str, instruction: str, history: str):
+    def forward(
+        self,
+        context: str,
+        instruction: str,
+        history: str = "",
+        current_response: str = "",
+        previous_feedback: str = "",
+    ):
         llm_logger.info(
             "predict",
             role="addition",
@@ -67,7 +82,8 @@ class AdditionModule(dspy.Module):
         return self.predict(
             context=context,
             instruction=instruction,
-            history=history,
+            current_response=current_response,
+            previous_feedback=previous_feedback,
             persona=self.persona,
         )
 
@@ -107,8 +123,8 @@ class SubtractionModule(dspy.Module):
         return self.predict(
             context=context,
             instruction=instruction,
-            history=history,
             candidate_response=candidate_response,
+            preservation_requirements=instruction,
             persona=self.persona,
         )
 
@@ -165,14 +181,16 @@ class ABSFramework(dspy.Module):
 
     def forward(self, context: str, instruction: str):
         history: list[AdditionBySubtractionExchange] = []
+        trajectory = DeliberationTrajectory()
         final_response = ""
 
         H_context = context
         H_instruction = instruction
 
         previous_refined_response: str | None = None
+        previous_feedback = ""
         for iteration in range(1, self.max_iterations + 1):
-            hist_str = self.format_history(history)
+            hist_str = trajectory.render()
             iter_token = set_current_iteration(iteration)
             try:
                 # Addition produces candidate
@@ -183,6 +201,8 @@ class ABSFramework(dspy.Module):
                         "context": H_context,
                         "instruction": H_instruction,
                         "history": hist_str,
+                        "current_response": previous_refined_response or "",
+                        "previous_feedback": previous_feedback,
                     },
                     attributes={
                         "agent.pattern": "addition_by_subtraction",
@@ -198,6 +218,8 @@ class ABSFramework(dspy.Module):
                         context=H_context,
                         instruction=H_instruction,
                         history=hist_str,
+                        current_response=previous_refined_response or "",
+                        previous_feedback=previous_feedback,
                     )
                     if span is not None:
                         span.set_outputs(
@@ -206,6 +228,19 @@ class ABSFramework(dspy.Module):
                                 "reasoning": add_out.reasoning,
                             }
                         )
+
+                trajectory = trajectory.record(
+                    round_index=iteration,
+                    role="addition",
+                    kind="proposal",
+                    content=add_out.candidate_response,
+                    reasoning=add_out.reasoning,
+                    claims=tuple(getattr(add_out, "additions", [])),
+                    delta=DeliberationDelta(
+                        added=tuple(getattr(add_out, "additions", []))
+                    ),
+                )
+                addition_event_id = trajectory.events[-1].event_id
 
                 # Subtraction refines
                 with mlflow_span(
@@ -241,11 +276,30 @@ class ABSFramework(dspy.Module):
                             }
                         )
 
+                trajectory = trajectory.record(
+                    round_index=iteration,
+                    role="subtraction",
+                    kind="revision",
+                    content=sub_out.refined_response,
+                    reasoning=sub_out.feedback,
+                    claims=tuple(getattr(sub_out, "preserved_facts", [])),
+                    delta=DeliberationDelta(
+                        removed=tuple(getattr(sub_out, "removals", [])),
+                        removal_reasons=tuple(getattr(sub_out, "removal_reasons", [])),
+                        preserved=tuple(getattr(sub_out, "preserved_facts", [])),
+                    ),
+                    parent_ids=(addition_event_id,),
+                )
+
                 exchange = AdditionBySubtractionExchange(
                     addition=add_out.candidate_response,
                     addition_reasoning=add_out.reasoning,
                     subtraction=sub_out.refined_response,
                     feedback=sub_out.feedback,
+                    additions=tuple(getattr(add_out, "additions", [])),
+                    removals=tuple(getattr(sub_out, "removals", [])),
+                    removal_reasons=tuple(getattr(sub_out, "removal_reasons", [])),
+                    preserved_facts=tuple(getattr(sub_out, "preserved_facts", [])),
                 )
                 history.append(exchange)
 
@@ -268,6 +322,7 @@ class ABSFramework(dspy.Module):
                     break
 
                 previous_refined_response = sub_out.refined_response
+                previous_feedback = sub_out.feedback
                 H_context = context
                 H_instruction = instruction
             finally:
@@ -281,8 +336,14 @@ class ABSFramework(dspy.Module):
             final_answer=final_response,
             justification="Refined via Addition-by-Subtraction iterative collaboration.",
             history=history,
+            trajectory=trajectory,
             iterations_used=len(history),
             stopped_early=self.early_exit and len(history) < self.max_iterations,
+            stop_reason=(
+                "unchanged"
+                if self.early_exit and len(history) < self.max_iterations
+                else "iteration_budget"
+            ),
         )
 
 

@@ -100,6 +100,42 @@ class PatternInterfaceTests(unittest.TestCase):
         self.assertEqual(result.final_answer, "Refined answer")
         self.assertEqual(result.history, prediction.history)
 
+    def test_debate_can_select_the_consensus_free_protocol(self) -> None:
+        prediction = SimpleNamespace(
+            final_answer="Consensus-free answer",
+            justification="Full trajectory",
+            iterations_used=1,
+            stopped_early=False,
+            history=("proposal", "revision"),
+        )
+        programs = []
+
+        def build_program(**settings):
+            program = _FakeProgram(prediction, **settings)
+            programs.append(program)
+            return program
+
+        with patch(
+            "awesome_dspy_agents.patterns.debate.pattern.ConsensusFreeDebate",
+            side_effect=build_program,
+        ):
+            result = DebatePattern().run(
+                PatternRunRequest(
+                    topic="Topic",
+                    config_path=self.config_path,
+                    overrides={
+                        "debate": {
+                            "protocol": "consensus_free",
+                            "agent_count": 3,
+                        }
+                    },
+                )
+            )
+
+        self.assertEqual(programs[0].settings["agent_count"], 3)
+        self.assertEqual(result.final_answer, "Consensus-free answer")
+        self.assertEqual(result.history, ["proposal", "revision"])
+
 
 if __name__ == "__main__":
     unittest.main()

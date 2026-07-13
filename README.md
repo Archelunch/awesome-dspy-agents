@@ -68,6 +68,7 @@ A collection of multi-agent systems implemented with the [DSPy](https://github.c
   - [Using the CLI](#using-the-cli)
   - [Configuration](#configuration)
   - [Examples](#examples)
+    - [Debate Protocols](#debate-protocols)
     - [Addition-by-Subtraction Pattern](#addition-by-subtraction-pattern)
   - [Development Guide](#development-guide)
     - [Project layout](#project-layout)
@@ -84,15 +85,18 @@ These are the built-in patterns. Use the CLI to explore and run them.
 
 | Pattern | Description | Strengths | Weaknesses |
 | --- | --- | --- | --- |
-| debate | Multi‑Agent Debate with a Judge. Two agents argue iteratively; an optional judge evaluates progress and extracts the final answer. | Strong adversarial reasoning; adaptive early stop; ReAct tool support. | Higher token usage; needs careful judge configuration. |
-| addition_by_subtraction | Addition‑by‑Subtraction collaboration. Addition expands details; Subtraction removes redundancy and feeds back; early exit when stable. | Concise refined answers; low iteration count by default (M≤2); ReAct tool support. | Can miss alternative directions; relies on good subtraction feedback. |
+| debate | Multi-Agent Debate with classic adversarial and consensus-free protocols. | Independent proposals, selective conflict routing, full-trajectory arbitration, adaptive classic mode, and ReAct tools. | More calls than a single predictor; arbitration and role configuration affect quality. |
+| addition_by_subtraction | Addition expands the latest response; Subtraction records removals, reasons, preserved facts, and feedback. | Inspectable refinement, concise answers, early exit, and ReAct tools. | Can miss alternative directions; relies on useful subtraction feedback. |
 
 Related work:
-#### Debates 
-Encouraging Divergent Thinking in Large Language Models through Multi-Agent Debate: https://arxiv.org/abs/2305.19118
+#### Debates
+
+- [Encouraging Divergent Thinking in Large Language Models through Multi-Agent Debate](https://arxiv.org/abs/2305.19118)
+- [Free-MAD: Consensus-Free Multi-Agent Debate](https://arxiv.org/abs/2509.11035)
 
 #### Addition by Subtraction
-(Perhaps) Beyond Human Translation: Harnessing Multi-Agent Collaboration for Translating Ultra-Long Literary Texts: https://arxiv.org/abs/2305.19118
+
+- [(Perhaps) Beyond Human Translation: Harnessing Multi-Agent Collaboration for Translating Ultra-Long Literary Texts](https://arxiv.org/abs/2405.11804)
 
 ### Available Tools
 
@@ -149,6 +153,11 @@ poetry run dspy-agents run debate "Is RLHF always beneficial?"
 
 # custom config
 poetry run dspy-agents run debate -c awesome_dspy_agents/patterns/debate/config.yaml "Debate topic"
+
+# consensus-free scenario: independent proposals, selective revision, arbitration
+poetry run dspy-agents run debate \
+  -c awesome_dspy_agents/patterns/debate/scenarios/consensus_free.yaml \
+  "Which conclusion is best supported?"
 
 # override nested config values at runtime (typed casting: bool/int/float)
 poetry run dspy-agents run debate "Topic" --set debate.max_iterations=3 --set debate.debate_level=2 --set judge.module_type=react
@@ -240,9 +249,31 @@ judge:
   tools: ["write_file"]
 
 debate:
+  protocol: classic_adversarial
   max_iterations: 5
   debate_level: 2
   adaptive_break: true
+```
+
+Use the included scenario for consensus-free debate, or configure it directly:
+
+```yaml
+debate:
+  protocol: consensus_free
+  agent_count: 2
+  perspectives:
+    - Focus on direct evidence and check assumptions.
+    - Search for counterexamples and alternative explanations.
+
+agents:
+  proposer:
+    module_type: predict
+  conflict_selector:
+    module_type: predict
+  reviser:
+    module_type: predict
+  arbiter:
+    module_type: predict
 ```
 
 ```yaml
@@ -271,11 +302,49 @@ Tips:
 
 - Point to a custom config: `-c path/to/config.yaml`.
 - OpenRouter DeepSeek profile: `examples/configs/openrouter-deepseek-v4-flash.yaml`.
+- Debate protocol: set `debate.protocol` to `classic_adversarial` or `consensus_free`.
+- Consensus-free diversity: set `debate.agent_count` and one `perspectives` entry per agent.
 - Override nested values at runtime (typed): `--set debate.max_iterations=3 --set judge.module_type=react`.
 - Per‑agent LM: set `agents.<name>.lm` block with `provider/model/api_base/api_key(_env)`.
 - File tools are sandboxed; add `--allow-path /abs/dir` to enable local file access.
 
 ## Examples
+
+### Debate Protocols
+
+Classic adversarial debate keeps the affirmative/negative exchange and optional
+confidence-based early stop. It remains the default for backward compatibility.
+
+Consensus-free debate uses this sequence:
+
+1. Generate independent proposals without peer history.
+2. Select and route consequential conflicts anonymously.
+3. Revise without treating majority agreement as evidence.
+4. Score every candidate and arbitrate over the complete trajectory.
+
+If no meaningful conflict is found, revision is skipped and the independent
+proposals go directly to arbitration.
+
+```bash
+poetry run dspy-agents run debate \
+  -c awesome_dspy_agents/patterns/debate/scenarios/consensus_free.yaml \
+  "Evaluate the evidence and choose the best-supported answer"
+```
+
+Each optimizable role remains a named DSPy predictor, so GEPA can improve the
+proposer, conflict selector, reviser, and arbiter instructions together:
+
+```python
+from awesome_dspy_agents.patterns.debate import ConsensusFreeDebate
+
+program = ConsensusFreeDebate(agent_count=2)
+for name, predictor in program.named_predictors():
+    print(name, predictor.signature.instructions)
+```
+
+Both protocols return an immutable trajectory. Events retain causal parents,
+claims, evidence IDs, revisions, and tool observations while role-specific views
+control what each agent sees.
 
 Run Debate with a custom judge and fewer iterations:
 
@@ -302,7 +371,13 @@ poetry run dspy-agents run addition_by_subtraction "Summarize the attached doc" 
 
 ### Addition-by-Subtraction Pattern
 
-This collaboration uses two agents only: Addition (expands and aggregates relevant details) and Subtraction (removes redundancy and provides feedback). It iterates up to `abs.max_iterations` with an early-exit when no further revision is needed.
+This collaboration uses two agents. Addition expands the latest refined response;
+Subtraction removes harmful or redundant material and returns feedback for the
+next round.
+
+The result includes a structured ledger of additions, removals, removal reasons,
+and preserved facts. It iterates up to `abs.max_iterations` and exits early when
+the refined response stops changing.
 
 - Default config: `awesome_dspy_agents/patterns/addition_by_subtraction/config.yaml`
 - Supports tools via ReAct (same registry as debate). Tools used are rendered in TUI under each iteration.
@@ -355,10 +430,16 @@ awesome_dspy_agents/
     ascii_to_png.py            # Example image tool
   patterns/
     interface.py               # AgentPattern protocol and discovery
+    deliberation/
+      trajectory.py            # Immutable events, deltas, evidence, and views
     debate/
-      pattern.py               # DebatePattern + MADFramework
+      pattern.py               # Runtime adapter + classic MADFramework
       signatures.py            # DSPy signatures
+      consensus_free.py        # Consensus-free protocol orchestration
+      consensus_free_signatures.py
       config.yaml              # Default config
+      scenarios/
+        consensus_free.yaml    # Ready-to-run modern debate preset
     addition_by_subtraction/
       pattern.py               # Addition-by-Subtraction Pattern + ABSFramework
       signatures.py            # DSPy signatures

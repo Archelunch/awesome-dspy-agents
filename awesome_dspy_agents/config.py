@@ -61,6 +61,9 @@ class JudgeConfig(BaseModel):
 class DebateConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    protocol: Literal["classic_adversarial", "consensus_free"] = "classic_adversarial"
+    agent_count: int = Field(default=2, ge=2)
+    perspectives: list[str] | None = None
     max_iterations: int = Field(default=3, ge=1)
     debate_level: int = Field(default=2, ge=0, le=3)
     adaptive_break: bool = True
