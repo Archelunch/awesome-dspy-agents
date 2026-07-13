@@ -6,7 +6,9 @@ from dataclasses import dataclass
 import dspy
 
 from awesome_dspy_agents.patterns.deliberation import (
+    DeliberationDelta,
     DeliberationTrajectory,
+    EvidenceArtifact,
     HistoryView,
 )
 from awesome_dspy_agents.predictor import build_predictor
@@ -98,15 +100,41 @@ class ConsensusFreeDebate(dspy.Module):
             react_max_iters=react_max_iters,
         )
 
-    def forward(self, problem: str, context: str = "") -> dspy.Prediction:
+    def forward(
+        self,
+        problem: str,
+        context: str = "",
+        evidence: Sequence[EvidenceArtifact] = (),
+    ) -> dspy.Prediction:
         trajectory = DeliberationTrajectory()
-        proposal_ids: list[str] = []
+        evidence_event_ids: dict[str, str] = {}
+        for artifact in evidence:
+            if artifact.evidence_id in evidence_event_ids:
+                raise ValueError(f"Duplicate evidence ID: {artifact.evidence_id}")
+            trajectory = trajectory.record(
+                round_index=0,
+                role="evidence",
+                kind="tool_observation" if artifact.kind == "tool" else "evidence",
+                content=artifact.content,
+                source_id=artifact.evidence_id,
+            )
+            evidence_event_ids[artifact.evidence_id] = trajectory.events[-1].event_id
 
-        # Proposals are deliberately independent: no peer history is provided.
+        evidence_context = trajectory.render(
+            HistoryView(event_ids=tuple(evidence_event_ids.values()))
+        )
+        effective_context = context
+        if evidence:
+            effective_context = (
+                f"{context}\n\nStructured evidence:\n{evidence_context}".strip()
+            )
+
+        proposal_ids: list[str] = []
         for index, perspective in enumerate(self.perspectives, start=1):
+            # Proposals are deliberately independent: no peer history is provided.
             proposal = self.proposer(
                 problem=problem,
-                context=context,
+                context=effective_context,
                 perspective=perspective,
             )
             trajectory = trajectory.record(
@@ -116,11 +144,18 @@ class ConsensusFreeDebate(dspy.Module):
                 content=proposal.answer,
                 reasoning=proposal.reasoning,
                 claims=tuple(proposal.claims),
-                evidence_ids=tuple(proposal.evidence_ids),
+                evidence_ids=tuple(
+                    evidence_id
+                    for evidence_id in proposal.evidence_ids
+                    if evidence_id in evidence_event_ids
+                ),
             )
             proposal_ids.append(trajectory.events[-1].event_id)
 
-        proposal_view = HistoryView(event_ids=tuple(proposal_ids), anonymize_roles=True)
+        proposal_view = HistoryView(
+            event_ids=(*evidence_event_ids.values(), *proposal_ids),
+            anonymize_roles=True,
+        )
         conflict_result = self.conflict_selector(
             problem=problem,
             proposals=trajectory.render(proposal_view),
@@ -130,25 +165,58 @@ class ConsensusFreeDebate(dspy.Module):
             for event_id in conflict_result.selected_event_ids
             if event_id in proposal_ids
         ]
-        # A malformed or over-pruned selector must not silently eliminate debate.
         if len(selected_ids) < 2:
             selected_ids = proposal_ids
 
+        conflicts = tuple(conflict_result.conflicts)
+        trajectory = trajectory.record(
+            round_index=1,
+            role="conflict-selector",
+            kind="critique",
+            content="\n".join(conflicts)
+            or "No explicit conflict description returned.",
+            parent_ids=tuple(selected_ids),
+        )
+        conflict_event_id = trajectory.events[-1].event_id
+        routes = getattr(conflict_result, "conflict_routes", {}) or {}
+        conflicts_by_event = getattr(conflict_result, "conflicts_by_event", {}) or {}
+
         revision_ids: list[str] = []
         for index, own_event_id in enumerate(proposal_ids, start=1):
+            routed_ids = routes.get(own_event_id, selected_ids)
             opposing_ids = [
-                event_id for event_id in selected_ids if event_id != own_event_id
+                event_id
+                for event_id in routed_ids
+                if event_id in proposal_ids and event_id != own_event_id
+            ]
+            if not opposing_ids:
+                opposing_ids = [
+                    event_id for event_id in proposal_ids if event_id != own_event_id
+                ]
+            opposing_evidence_ids = {
+                evidence_id
+                for event_id in opposing_ids
+                for evidence_id in trajectory.get(event_id).evidence_ids
+            }
+            visible_evidence_events = [
+                event_id
+                for evidence_id, event_id in evidence_event_ids.items()
+                if evidence_id in opposing_evidence_ids
             ]
             opposing_view = HistoryView(
-                event_ids=tuple(opposing_ids), anonymize_roles=True
+                event_ids=(*visible_evidence_events, *opposing_ids),
+                anonymize_roles=True,
             )
             original = trajectory.get(own_event_id)
             revision = self.reviser(
                 problem=problem,
-                context=context,
+                context=effective_context,
                 original_answer=original.content,
                 opposing_arguments=trajectory.render(opposing_view),
-                conflicts=list(conflict_result.conflicts),
+                conflicts=list(conflicts_by_event.get(own_event_id, conflicts)),
+            )
+            revised_evidence_ids = getattr(
+                revision, "evidence_ids", original.evidence_ids
             )
             trajectory = trajectory.record(
                 round_index=1,
@@ -159,7 +227,17 @@ class ConsensusFreeDebate(dspy.Module):
                 claims=tuple(
                     [*revision.retained_claims, *revision.accepted_corrections]
                 ),
-                parent_ids=(own_event_id, *opposing_ids),
+                delta=DeliberationDelta(
+                    preserved=tuple(revision.retained_claims),
+                    rejected=tuple(revision.rejected_claims),
+                    accepted_corrections=tuple(revision.accepted_corrections),
+                ),
+                parent_ids=(own_event_id, *opposing_ids, conflict_event_id),
+                evidence_ids=tuple(
+                    evidence_id
+                    for evidence_id in revised_evidence_ids
+                    if evidence_id in evidence_event_ids
+                ),
             )
             revision_ids.append(trajectory.events[-1].event_id)
 
@@ -170,7 +248,7 @@ class ConsensusFreeDebate(dspy.Module):
                     exchange=ConsensusFreeDebateRound(
                         proposal_ids=tuple(proposal_ids),
                         revision_ids=tuple(revision_ids),
-                        conflicts=tuple(conflict_result.conflicts),
+                        conflicts=conflicts,
                     ),
                     history=trajectory.render(),
                 )
@@ -178,7 +256,7 @@ class ConsensusFreeDebate(dspy.Module):
 
         arbitration = self.arbiter(
             problem=problem,
-            context=context,
+            context=effective_context,
             trajectory=trajectory.render(
                 HistoryView(anonymize_roles=True, include_reasoning=True)
             ),
@@ -207,4 +285,5 @@ class ConsensusFreeDebate(dspy.Module):
             iterations_used=1,
             stopped_early=False,
             stop_reason="completed",
+            candidate_scores=getattr(arbitration, "candidate_scores", {}),
         )

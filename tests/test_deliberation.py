@@ -44,6 +44,8 @@ class DeliberationTrajectoryTests(unittest.TestCase):
             role="proposer-2",
             kind="proposal",
             content="Second answer",
+            claims=("Supported claim",),
+            evidence_ids=("document-7",),
         )
 
         rendered = trajectory.render(
@@ -55,6 +57,8 @@ class DeliberationTrajectoryTests(unittest.TestCase):
         self.assertNotIn("proposer-2", rendered)
         self.assertNotIn("First answer", rendered)
         self.assertNotIn("private chain", rendered)
+        self.assertIn("Claims: Supported claim", rendered)
+        self.assertIn("Evidence: document-7", rendered)
 
 
 if __name__ == "__main__":

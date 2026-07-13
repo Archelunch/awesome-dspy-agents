@@ -30,6 +30,12 @@ class SelectConflicts(dspy.Signature):
     conflicts: list[str] = dspy.OutputField(
         desc="Specific contradictory claims, evidence, or conclusions"
     )
+    conflict_routes: dict[str, list[str]] = dspy.OutputField(
+        desc="For each candidate event ID, the opposing event IDs it should inspect"
+    )
+    conflicts_by_event: dict[str, list[str]] = dspy.OutputField(
+        desc="For each candidate event ID, only its relevant conflict descriptions"
+    )
 
 
 class ReviseWithoutConformity(dspy.Signature):
@@ -52,6 +58,9 @@ class ReviseWithoutConformity(dspy.Signature):
     accepted_corrections: list[str] = dspy.OutputField(
         desc="Corrections accepted from opposing arguments with justification"
     )
+    evidence_ids: list[str] = dspy.OutputField(
+        desc="Identifiers of supplied evidence supporting the revised answer"
+    )
     revised_answer: str = dspy.OutputField()
     reasoning: str = dspy.OutputField(desc="Why the answer changed or remained stable")
 
@@ -67,6 +76,9 @@ class ArbitrateFullTrajectory(dspy.Signature):
 
     winning_event_id: str = dspy.OutputField(
         desc="Event ID containing the strongest answer"
+    )
+    candidate_scores: dict[str, float] = dspy.OutputField(
+        desc="Evidence-grounded score for every proposal or revision considered"
     )
     final_answer: str = dspy.OutputField()
     justification: str = dspy.OutputField(

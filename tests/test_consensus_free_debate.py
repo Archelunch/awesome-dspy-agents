@@ -11,6 +11,7 @@ os.environ.setdefault(
 import dspy
 
 from awesome_dspy_agents.patterns.debate.consensus_free import ConsensusFreeDebate
+from awesome_dspy_agents.patterns.deliberation import EvidenceArtifact
 
 
 class _Proposer(dspy.Module):
@@ -37,6 +38,20 @@ class _ConflictSelector(dspy.Module):
         )
 
 
+class _RoutedConflictSelector(dspy.Module):
+    def forward(self, **_inputs):
+        return dspy.Prediction(
+            selected_event_ids=["event-1", "event-2", "event-3"],
+            conflicts=["global conflict"],
+            conflict_routes={
+                "event-1": ["event-2"],
+                "event-2": ["event-1"],
+                "event-3": ["event-1"],
+            },
+            conflicts_by_event={"event-1": ["relevant to the first proposal"]},
+        )
+
+
 class _Reviser(dspy.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -54,7 +69,12 @@ class _Reviser(dspy.Module):
 
 
 class _Arbiter(dspy.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = []
+
     def forward(self, **_inputs):
+        self.calls.append(_inputs)
         return dspy.Prediction(
             winning_event_id="event-3",
             final_answer="best answer",
@@ -97,10 +117,74 @@ class ConsensusFreeDebateTests(unittest.TestCase):
         self.assertNotIn("proposer-", reviser.calls[0]["opposing_arguments"])
         self.assertEqual(
             [event.kind for event in result.trajectory.events],
-            ["proposal", "proposal", "revision", "revision", "judgment"],
+            [
+                "proposal",
+                "proposal",
+                "critique",
+                "revision",
+                "revision",
+                "judgment",
+            ],
         )
-        self.assertEqual(result.trajectory.events[2].parent_ids, ("event-1", "event-2"))
-        self.assertEqual(events[0].exchange.revision_ids, ("event-3", "event-4"))
+        self.assertEqual(
+            result.trajectory.events[3].parent_ids,
+            ("event-1", "event-2", "event-3"),
+        )
+        self.assertEqual(events[0].exchange.revision_ids, ("event-4", "event-5"))
+
+    def test_records_and_validates_document_and_tool_evidence(self) -> None:
+        debate = ConsensusFreeDebate(agent_count=2)
+        proposer = _Proposer()
+        arbiter = _Arbiter()
+        debate.proposer = proposer
+        debate.conflict_selector = _ConflictSelector()
+        debate.reviser = _Reviser()
+        debate.arbiter = arbiter
+
+        original_forward = proposer.forward
+
+        def propose_with_evidence(**inputs):
+            prediction = original_forward(**inputs)
+            prediction.evidence_ids = ["document-1", "invented-source"]
+            return prediction
+
+        proposer.forward = propose_with_evidence
+        result = debate(
+            problem="What is correct?",
+            evidence=(
+                EvidenceArtifact("document-1", "Document evidence"),
+                EvidenceArtifact("tool-1", "Tool output", kind="tool"),
+            ),
+        )
+
+        self.assertEqual(
+            [event.kind for event in result.trajectory.events[:2]],
+            ["evidence", "tool_observation"],
+        )
+        self.assertEqual(result.trajectory.events[2].evidence_ids, ("document-1",))
+        self.assertIn("Source: document-1", arbiter.calls[0]["trajectory"])
+        self.assertNotIn("invented-source", arbiter.calls[0]["trajectory"])
+
+    def test_routes_only_relevant_conflicts_to_each_reviser(self) -> None:
+        debate = ConsensusFreeDebate(agent_count=3)
+        reviser = _Reviser()
+        debate.proposer = _Proposer()
+        debate.conflict_selector = _RoutedConflictSelector()
+        debate.reviser = reviser
+        debate.arbiter = _Arbiter()
+
+        debate(problem="What is correct?")
+
+        self.assertIn(
+            "answer-independent perspective 2", reviser.calls[0]["opposing_arguments"]
+        )
+        self.assertNotIn(
+            "answer-independent perspective 3",
+            reviser.calls[0]["opposing_arguments"],
+        )
+        self.assertEqual(
+            reviser.calls[0]["conflicts"], ["relevant to the first proposal"]
+        )
 
 
 if __name__ == "__main__":

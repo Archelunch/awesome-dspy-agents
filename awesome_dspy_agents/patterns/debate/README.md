@@ -25,6 +25,21 @@ for event in result.trajectory.events:
     print(event.event_id, event.kind, event.parent_ids)
 ```
 
+Documents and tool outputs can be supplied with stable provenance IDs. References
+invented by a model are not attached to proposal events:
+
+```python
+from awesome_dspy_agents.patterns.deliberation import EvidenceArtifact
+
+result = debate(
+    problem="Which conclusion is best supported?",
+    evidence=(
+        EvidenceArtifact("document-1", document_text),
+        EvidenceArtifact("tool-1", tool_output, kind="tool"),
+    ),
+)
+```
+
 Every optimizable role is a named DSPy predictor:
 
 ```python

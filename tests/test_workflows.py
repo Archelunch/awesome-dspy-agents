@@ -29,15 +29,23 @@ class _Addition(dspy.Module):
 
 class _Subtraction(dspy.Module):
     def forward(self, **_inputs):
-        return dspy.Prediction(refined_response="refined", feedback="feedback")
+        return dspy.Prediction(
+            refined_response="refined",
+            feedback="feedback",
+            removals=["repetition"],
+            removal_reasons=["duplicate"],
+            preserved_facts=["supported fact"],
+        )
 
 
 class _Debater(dspy.Module):
     def __init__(self, affirmative: bool) -> None:
         super().__init__()
         self.affirmative = affirmative
+        self.calls = []
 
     def forward(self, **_inputs):
+        self.calls.append(_inputs)
         if self.affirmative:
             return dspy.Prediction(argument="yes", reasoning="for")
         return dspy.Prediction(counter_argument="no", reasoning="against")
@@ -68,6 +76,7 @@ class WorkflowStateTests(unittest.TestCase):
             [event.kind for event in first.trajectory.events],
             ["proposal", "revision"],
         )
+        self.assertEqual(first.trajectory.events[1].delta.removed, ("repetition",))
         self.assertEqual(framework.history, [])  # DSPy base history remains untouched.
 
     def test_addition_receives_the_latest_refined_state_not_only_a_transcript(
@@ -105,6 +114,19 @@ class WorkflowStateTests(unittest.TestCase):
             ["proposal", "critique", "judgment"],
         )
         self.assertFalse(hasattr(framework, "debate_history"))
+
+    def test_classic_debate_preserves_its_legacy_history_prompt(self) -> None:
+        framework = MADFramework(max_iterations=2, adaptive_break=False)
+        affirmative = _Debater(True)
+        framework.affirmative = affirmative
+        framework.negative = _Debater(False)
+        framework.judge = _Judge()
+
+        framework(debate_topic="topic")
+
+        second_round_history = affirmative.calls[1]["debate_history"]
+        self.assertIn("--- Iteration 1 ---", second_round_history)
+        self.assertNotIn("[event-", second_round_history)
 
 
 if __name__ == "__main__":

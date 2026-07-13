@@ -4,12 +4,35 @@ from dataclasses import dataclass
 from typing import Literal
 
 EventKind = Literal[
+    "evidence",
     "proposal",
     "critique",
     "revision",
     "tool_observation",
     "judgment",
 ]
+EvidenceKind = Literal["context", "document", "tool"]
+
+
+@dataclass(frozen=True)
+class EvidenceArtifact:
+    """Evidence supplied to a deliberation with a stable external identifier."""
+
+    evidence_id: str
+    content: str
+    kind: EvidenceKind = "document"
+
+
+@dataclass(frozen=True)
+class DeliberationDelta:
+    """Structured changes made by a proposal, critique, or revision."""
+
+    added: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+    removal_reasons: tuple[str, ...] = ()
+    preserved: tuple[str, ...] = ()
+    rejected: tuple[str, ...] = ()
+    accepted_corrections: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -23,8 +46,10 @@ class DeliberationEvent:
     content: str
     reasoning: str = ""
     claims: tuple[str, ...] = ()
+    delta: DeliberationDelta = DeliberationDelta()
     parent_ids: tuple[str, ...] = ()
     evidence_ids: tuple[str, ...] = ()
+    source_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -52,8 +77,10 @@ class DeliberationTrajectory:
         content: str,
         reasoning: str = "",
         claims: tuple[str, ...] = (),
+        delta: DeliberationDelta | None = None,
         parent_ids: tuple[str, ...] = (),
         evidence_ids: tuple[str, ...] = (),
+        source_id: str = "",
     ) -> DeliberationTrajectory:
         known_ids = {event.event_id for event in self.events}
         unknown_parents = set(parent_ids) - known_ids
@@ -69,8 +96,10 @@ class DeliberationTrajectory:
             content=content,
             reasoning=reasoning,
             claims=claims,
+            delta=delta or DeliberationDelta(),
             parent_ids=parent_ids,
             evidence_ids=evidence_ids,
+            source_id=source_id,
         )
         return DeliberationTrajectory(events=(*self.events, event))
 
@@ -104,6 +133,25 @@ class DeliberationTrajectory:
                 f"[{event.event_id} | round {event.round_index} | "
                 f"{role} | {event.kind}]\n{event.content}"
             )
+            if event.source_id:
+                lines.append(f"Source: {event.source_id}")
+            if event.claims:
+                lines.append(f"Claims: {'; '.join(event.claims)}")
+            if event.evidence_ids:
+                lines.append(f"Evidence: {', '.join(event.evidence_ids)}")
+            if event.parent_ids:
+                lines.append(f"Responds to: {', '.join(event.parent_ids)}")
+            delta_lines = (
+                ("Added", event.delta.added),
+                ("Removed", event.delta.removed),
+                ("Removal reasons", event.delta.removal_reasons),
+                ("Preserved", event.delta.preserved),
+                ("Rejected", event.delta.rejected),
+                ("Accepted corrections", event.delta.accepted_corrections),
+            )
+            for label, values in delta_lines:
+                if values:
+                    lines.append(f"{label}: {'; '.join(values)}")
             if view.include_reasoning and event.reasoning:
                 lines.append(f"Reasoning: {event.reasoning}")
         return "\n\n".join(lines)

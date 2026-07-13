@@ -7,7 +7,10 @@ import dspy  # type: ignore
 from awesome_dspy_agents.config import AppConfig, build_lm, load_config
 from awesome_dspy_agents.logging_setup import get_logger
 from awesome_dspy_agents.mlflow_integration import mlflow_span
-from awesome_dspy_agents.patterns.deliberation import DeliberationTrajectory
+from awesome_dspy_agents.patterns.deliberation import (
+    DeliberationDelta,
+    DeliberationTrajectory,
+)
 from awesome_dspy_agents.patterns.interface import AgentPattern
 from awesome_dspy_agents.predictor import build_predictor
 from awesome_dspy_agents.runtime import (
@@ -33,6 +36,10 @@ class AdditionBySubtractionExchange:
     addition_reasoning: str
     subtraction: str
     feedback: str
+    additions: tuple[str, ...] = ()
+    removals: tuple[str, ...] = ()
+    removal_reasons: tuple[str, ...] = ()
+    preserved_facts: tuple[str, ...] = ()
 
 
 class AdditionModule(dspy.Module):
@@ -229,6 +236,9 @@ class ABSFramework(dspy.Module):
                     content=add_out.candidate_response,
                     reasoning=add_out.reasoning,
                     claims=tuple(getattr(add_out, "additions", [])),
+                    delta=DeliberationDelta(
+                        added=tuple(getattr(add_out, "additions", []))
+                    ),
                 )
                 addition_event_id = trajectory.events[-1].event_id
 
@@ -273,6 +283,11 @@ class ABSFramework(dspy.Module):
                     content=sub_out.refined_response,
                     reasoning=sub_out.feedback,
                     claims=tuple(getattr(sub_out, "preserved_facts", [])),
+                    delta=DeliberationDelta(
+                        removed=tuple(getattr(sub_out, "removals", [])),
+                        removal_reasons=tuple(getattr(sub_out, "removal_reasons", [])),
+                        preserved=tuple(getattr(sub_out, "preserved_facts", [])),
+                    ),
                     parent_ids=(addition_event_id,),
                 )
 
@@ -281,6 +296,10 @@ class ABSFramework(dspy.Module):
                     addition_reasoning=add_out.reasoning,
                     subtraction=sub_out.refined_response,
                     feedback=sub_out.feedback,
+                    additions=tuple(getattr(add_out, "additions", [])),
+                    removals=tuple(getattr(sub_out, "removals", [])),
+                    removal_reasons=tuple(getattr(sub_out, "removal_reasons", [])),
+                    preserved_facts=tuple(getattr(sub_out, "preserved_facts", [])),
                 )
                 history.append(exchange)
 
