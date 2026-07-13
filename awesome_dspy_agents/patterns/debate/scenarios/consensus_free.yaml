@@ -1,0 +1,18 @@
+debate:
+  protocol: consensus_free
+  agent_count: 2
+  # These labels encourage different independent analyses without assigning
+  # either agent a predetermined conclusion.
+  perspectives:
+    - Focus on the strongest direct evidence and check every assumption.
+    - Search for counterexamples, missing evidence, and alternative explanations.
+
+agents:
+  proposer:
+    module_type: predict
+  conflict_selector:
+    module_type: predict
+  reviser:
+    module_type: predict
+  arbiter:
+    module_type: predict

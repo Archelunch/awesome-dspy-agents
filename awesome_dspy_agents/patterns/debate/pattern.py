@@ -7,6 +7,7 @@ import dspy  # type: ignore
 from awesome_dspy_agents.config import AppConfig, build_lm, load_config
 from awesome_dspy_agents.logging_setup import get_logger
 from awesome_dspy_agents.mlflow_integration import mlflow_span
+from awesome_dspy_agents.patterns.deliberation import DeliberationTrajectory
 from awesome_dspy_agents.patterns.interface import AgentPattern
 from awesome_dspy_agents.predictor import build_predictor
 from awesome_dspy_agents.runtime import (
@@ -21,6 +22,7 @@ from awesome_dspy_agents.tools.registry import (
     set_current_iteration,
 )
 
+from .consensus_free import ConsensusFreeDebate
 from .signatures import (
     AffirmativeDebater,
     JudgeDiscriminative,
@@ -281,6 +283,7 @@ class MADFramework(dspy.Module):
     ):
         """Run complete debate process."""
         history: list[DebateExchange] = []
+        trajectory = DeliberationTrajectory()
         solution_found = False
         final_answer = None
 
@@ -350,6 +353,24 @@ class MADFramework(dspy.Module):
                             }
                         )
 
+                trajectory = trajectory.record(
+                    round_index=iteration,
+                    role="affirmative",
+                    kind="proposal",
+                    content=aff_response.argument,
+                    reasoning=aff_response.reasoning,
+                )
+                affirmative_event_id = trajectory.events[-1].event_id
+                trajectory = trajectory.record(
+                    round_index=iteration,
+                    role="negative",
+                    kind="critique",
+                    content=neg_response.counter_argument,
+                    reasoning=neg_response.reasoning,
+                    parent_ids=(affirmative_event_id,),
+                )
+                negative_event_id = trajectory.events[-1].event_id
+
                 # Record exchange
                 exchange = DebateExchange(
                     affirmative=aff_response.argument,
@@ -405,6 +426,18 @@ class MADFramework(dspy.Module):
 
                     exchange = replace(exchange, judge_eval=judge_eval.reasoning)
                     history[-1] = exchange
+                    trajectory = trajectory.record(
+                        round_index=iteration,
+                        role="judge",
+                        kind="judgment",
+                        content=(
+                            "solution found"
+                            if judge_eval.solution_found
+                            else "continue deliberation"
+                        ),
+                        reasoning=judge_eval.reasoning,
+                        parent_ids=(affirmative_event_id, negative_event_id),
+                    )
 
                     # Callback after judge evaluation
                     if self.on_iteration is not None:
@@ -445,6 +478,14 @@ class MADFramework(dspy.Module):
                                         "justification": final_answer.justification,
                                     }
                                 )
+                        trajectory = trajectory.record(
+                            round_index=iteration,
+                            role="judge",
+                            kind="judgment",
+                            content=final_answer.final_answer,
+                            reasoning=final_answer.justification,
+                            parent_ids=(affirmative_event_id, negative_event_id),
+                        )
                         break
             finally:
                 reset_current_iteration(iter_token)
@@ -480,22 +521,40 @@ class MADFramework(dspy.Module):
                         }
                     )
             final_answer = final_prediction
+            parent_ids = tuple(
+                event.event_id
+                for event in trajectory.events
+                if event.kind in {"proposal", "critique"}
+                and event.round_index == len(history)
+            )
+            trajectory = trajectory.record(
+                round_index=len(history),
+                role="judge",
+                kind="judgment",
+                content=final_prediction.final_answer,
+                reasoning=final_prediction.justification,
+                parent_ids=parent_ids,
+            )
 
         if final_answer is None:
             return dspy.Prediction(
                 final_answer="",
                 justification="",
                 history=history,
+                trajectory=trajectory,
                 iterations_used=len(history),
                 stopped_early=solution_found,
+                stop_reason="no_answer",
             )
 
         return dspy.Prediction(
             final_answer=final_answer.final_answer,
             justification=final_answer.justification,
             history=history,
+            trajectory=trajectory,
             iterations_used=len(history),
             stopped_early=solution_found,
+            stop_reason="solution_found" if solution_found else "iteration_budget",
         )
 
 
@@ -554,6 +613,75 @@ class DebatePattern(AgentPattern):
             cfg: AppConfig,
             emit: Callable[[IterationEvent], None],
         ) -> PatternOutcome:
+            if cfg.debate.protocol == "consensus_free":
+                proposer_cfg = cfg.agents.get("proposer")
+                selector_cfg = cfg.agents.get("conflict_selector")
+                reviser_cfg = cfg.agents.get("reviser")
+                arbiter_cfg = cfg.agents.get("arbiter")
+                framework = ConsensusFreeDebate(
+                    agent_count=cfg.debate.agent_count,
+                    perspectives=cfg.debate.perspectives,
+                    proposer_module_type=(
+                        proposer_cfg.module_type if proposer_cfg else "predict"
+                    ),
+                    conflict_selector_module_type=(
+                        selector_cfg.module_type if selector_cfg else "predict"
+                    ),
+                    reviser_module_type=(
+                        reviser_cfg.module_type if reviser_cfg else "predict"
+                    ),
+                    arbiter_module_type=(
+                        arbiter_cfg.module_type
+                        if arbiter_cfg
+                        else cfg.judge.module_type
+                    ),
+                    proposer_lm=(
+                        build_lm(proposer_cfg.lm)
+                        if proposer_cfg and proposer_cfg.lm
+                        else None
+                    ),
+                    conflict_selector_lm=(
+                        build_lm(selector_cfg.lm)
+                        if selector_cfg and selector_cfg.lm
+                        else (
+                            build_lm(cfg.judge.discriminative_lm)
+                            if cfg.judge.discriminative_lm
+                            else None
+                        )
+                    ),
+                    reviser_lm=(
+                        build_lm(reviser_cfg.lm)
+                        if reviser_cfg and reviser_cfg.lm
+                        else None
+                    ),
+                    arbiter_lm=(
+                        build_lm(arbiter_cfg.lm)
+                        if arbiter_cfg and arbiter_cfg.lm
+                        else (
+                            build_lm(cfg.judge.extractive_lm)
+                            if cfg.judge.extractive_lm
+                            else None
+                        )
+                    ),
+                    proposer_tools=(proposer_cfg.tools if proposer_cfg else []),
+                    conflict_selector_tools=(
+                        selector_cfg.tools if selector_cfg else []
+                    ),
+                    reviser_tools=(reviser_cfg.tools if reviser_cfg else []),
+                    arbiter_tools=(
+                        arbiter_cfg.tools if arbiter_cfg else cfg.judge.tools
+                    ),
+                    on_iteration=emit,
+                )
+                final = framework(problem=current_request.topic, context="")
+                return PatternOutcome(
+                    final_answer=final.final_answer,
+                    justification=final.justification,
+                    iterations_used=final.iterations_used,
+                    stopped_early=final.stopped_early,
+                    history=list(final.history),
+                )
+
             aff_cfg = cfg.agents.get("affirmative")
             neg_cfg = cfg.agents.get("negative")
             framework = MADFramework(

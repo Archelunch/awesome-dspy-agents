@@ -18,7 +18,12 @@ from awesome_dspy_agents.patterns.debate.pattern import DebateExchange, MADFrame
 
 
 class _Addition(dspy.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = []
+
     def forward(self, **_inputs):
+        self.calls.append(_inputs)
         return dspy.Prediction(candidate_response="draft", reasoning="reason")
 
 
@@ -59,7 +64,25 @@ class WorkflowStateTests(unittest.TestCase):
         self.assertEqual(len(second.history), 1)
         self.assertIsNot(first.history, second.history)
         self.assertIsInstance(events[0].exchange, AdditionBySubtractionExchange)
+        self.assertEqual(
+            [event.kind for event in first.trajectory.events],
+            ["proposal", "revision"],
+        )
         self.assertEqual(framework.history, [])  # DSPy base history remains untouched.
+
+    def test_addition_receives_the_latest_refined_state_not_only_a_transcript(
+        self,
+    ) -> None:
+        framework = ABSFramework(max_iterations=2)
+        addition = _Addition()
+        framework.addition = addition
+        framework.subtraction = _Subtraction()
+
+        framework(context="", instruction="improve this")
+
+        self.assertEqual(addition.calls[0]["current_response"], "")
+        self.assertEqual(addition.calls[1]["current_response"], "refined")
+        self.assertEqual(addition.calls[1]["previous_feedback"], "feedback")
 
     def test_debate_is_reusable_and_emits_typed_exchanges(self) -> None:
         events = []
@@ -77,6 +100,10 @@ class WorkflowStateTests(unittest.TestCase):
         self.assertEqual(len(second.history), 1)
         self.assertIsNot(first.history, second.history)
         self.assertIsInstance(events[0].exchange, DebateExchange)
+        self.assertEqual(
+            [event.kind for event in first.trajectory.events],
+            ["proposal", "critique", "judgment"],
+        )
         self.assertFalse(hasattr(framework, "debate_history"))
 
 
