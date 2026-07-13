@@ -5,11 +5,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
-os.environ.setdefault("DSPY_CACHEDIR", f"{tempfile.gettempdir()}/dspy-agents-test-cache")
+os.environ.setdefault(
+    "DSPY_CACHEDIR", f"{tempfile.gettempdir()}/dspy-agents-test-cache"
+)
 
 import dspy
 
-from awesome_dspy_agents.runtime import PatternOutcome, PatternRunRequest, PatternRuntime
+from awesome_dspy_agents.runtime import (
+    PatternOutcome,
+    PatternRunRequest,
+    PatternRuntime,
+)
 
 
 class PatternRuntimeTests(unittest.TestCase):
@@ -39,7 +45,11 @@ class PatternRuntimeTests(unittest.TestCase):
         def execute(_request, emit):
             from awesome_dspy_agents.runtime import IterationEvent
 
-            emit(IterationEvent(iteration=1, exchange={"answer": "draft"}, history="draft"))
+            emit(
+                IterationEvent(
+                    iteration=1, exchange={"answer": "draft"}, history="draft"
+                )
+            )
             return PatternOutcome(
                 final_answer="Answer",
                 justification="Because",
@@ -71,6 +81,7 @@ class PatternRuntimeTests(unittest.TestCase):
         runtime.run(request, execute=execute, lm=run_lm)
 
         self.assertIs(dspy.settings.lm, previous_lm)
+
 
 if __name__ == "__main__":
     unittest.main()

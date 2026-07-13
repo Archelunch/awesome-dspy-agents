@@ -3,7 +3,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import questionary  # type: ignore
 import typer  # type: ignore
@@ -56,21 +56,23 @@ def _pattern_map():
 
 @app.callback()
 def _setup(
-    allow_path: Optional[List[str]] = typer.Option(
+    allow_path: list[str] | None = typer.Option(
         None,
         "--allow-path",
         help="Allow file tools to access given absolute directories (repeatable)",
     ),
 ):
     global _allowed_paths
-    _allowed_paths = tuple(Path(path).expanduser().resolve() for path in allow_path or [])
+    _allowed_paths = tuple(
+        Path(path).expanduser().resolve() for path in allow_path or []
+    )
 
 
 def _coerce_value(s: str):
     return yaml.safe_load(s)
 
 
-def _parse_overrides(set: Optional[list[str]]) -> dict:
+def _parse_overrides(set: list[str] | None) -> dict:
     overrides: dict = {}
     if not set:
         return overrides
@@ -92,8 +94,8 @@ def _execute_pattern(
     config_path: Path,
     overrides: dict,
     json_output: bool,
-    save_path: Optional[Path],
-) -> Dict[str, Any]:
+    save_path: Path | None,
+) -> dict[str, Any]:
     patterns = _pattern_map()
     pat = patterns.get(pattern_name)
     if not pat:
@@ -103,8 +105,8 @@ def _execute_pattern(
         raise typer.Exit(code=1)
 
     # Tool event capture for TUI
-    tool_events_by_iter: Dict[int, List[Dict[str, Any]]] = {}
-    printed_index_by_iter: Dict[int, int] = {}
+    tool_events_by_iter: dict[int, list[dict[str, Any]]] = {}
+    printed_index_by_iter: dict[int, int] = {}
 
     def _tool_listener(event: ToolEvent) -> None:
         iteration = event.iteration
@@ -145,7 +147,7 @@ def _execute_pattern(
         )
     except Exception as e:
         console.print(f"[bold red]Error during run:[/bold red] {e}")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from e
 
     result = asdict(outcome)
     record = {
@@ -238,7 +240,7 @@ def describe(
 
     cfg = pat.default_config_path()
     if cfg and cfg.exists():
-        with open(cfg, "r") as f:
+        with open(cfg) as f:
             console.print(Panel(f.read(), title="Default Configuration (config.yaml)"))
     else:
         console.print("No config.yaml found for this pattern.")
@@ -247,21 +249,17 @@ def describe(
 @app.command()
 def run(
     pattern_name: str = typer.Argument(..., help="The name of the pattern to run."),
-    topic: Optional[str] = typer.Argument(
-        None, help="The topic or task for the pattern."
-    ),
-    config: Optional[Path] = typer.Option(
+    topic: str | None = typer.Argument(None, help="The topic or task for the pattern."),
+    config: Path | None = typer.Option(
         None, "--config", "-c", help="Path to a YAML config file."
     ),
-    set: Optional[list[str]] = typer.Option(
+    set: list[str] | None = typer.Option(
         None, "--set", help="Override config values, e.g. debate.max_iterations=5"
     ),
     json_output: bool = typer.Option(
         False, "--json", help="Emit JSON record instead of TUI"
     ),
-    save: Optional[Path] = typer.Option(
-        None, "--save", help="Save session to JSON file"
-    ),
+    save: Path | None = typer.Option(None, "--save", help="Save session to JSON file"),
 ):
     """Run a specific agent pattern."""
     patterns = _pattern_map()
@@ -306,10 +304,10 @@ def run(
 
 @app.command("tools")
 def tools(
-    pattern_name: Optional[str] = typer.Option(
+    pattern_name: str | None = typer.Option(
         None, "--pattern", help="Filter tools for a specific pattern"
     ),
-    describe: Optional[str] = typer.Option(
+    describe: str | None = typer.Option(
         None, "--describe", help="Describe specific tool"
     ),
 ):
@@ -319,9 +317,9 @@ def tools(
         executor = ToolExecutor(default_catalog, FileAccessPolicy())
         try:
             fn = executor.get(describe)
-        except KeyError:
+        except KeyError as error:
             console.print(f"[bold red]Error:[/bold red] Unknown tool '{describe}'")
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from error
         sig = getattr(fn, "__signature__", None)
         doc = getattr(fn, "__doc__", None) or "(no docstring)"
         console.print(
@@ -393,7 +391,7 @@ def interactive():
         raise typer.Exit(code=1)
 
     configs = list(pat.available_configs())
-    config_path: Optional[Path] = None
+    config_path: Path | None = None
     if configs:
         console.print(Panel.fit("Available configs:", style="bold blue"))
         for p in configs:
@@ -435,7 +433,7 @@ def replay(path: Path = typer.Argument(..., help="Path to saved session JSON")):
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
         console.print(f"[bold red]Error:[/bold red] {e}")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from e
 
     if data.get("schema") != 2:
         console.print("[bold red]Error:[/bold red] Only session schema 2 is supported.")
@@ -444,10 +442,10 @@ def replay(path: Path = typer.Argument(..., help="Path to saved session JSON")):
     pattern_name = data.get("pattern", "?")
     topic = data.get("topic", "")
     tui.render_header(pattern_name, topic)
-    events_by_iter: Dict[int, List[Dict[str, Any]]] = {
+    events_by_iter: dict[int, list[dict[str, Any]]] = {
         int(k): v for k, v in (data.get("tool_events_by_iter", {}) or {}).items()
     }
-    printed_index_by_iter: Dict[int, int] = {}
+    printed_index_by_iter: dict[int, int] = {}
     history = data.get("result", {}).get("history") or []
     for i, exchange in enumerate(history, 1):
         tui.render_iteration(i, exchange)
@@ -465,8 +463,8 @@ def compare(
     pattern_a: str = typer.Argument(..., help="First pattern"),
     pattern_b: str = typer.Argument(..., help="Second pattern"),
     topic: str = typer.Argument(..., help="Topic"),
-    config_a: Optional[Path] = typer.Option(None, "--config-a"),
-    config_b: Optional[Path] = typer.Option(None, "--config-b"),
+    config_a: Path | None = typer.Option(None, "--config-a"),
+    config_b: Path | None = typer.Option(None, "--config-b"),
     metric: str = typer.Option("exact", "--metric", help="exact|length|jaccard"),
 ):
     patterns = _pattern_map()
@@ -479,7 +477,9 @@ def compare(
     cfg_a = config_a or patterns[pattern_a].default_config_path()
     cfg_b = config_b or patterns[pattern_b].default_config_path()
     if cfg_a is None or cfg_b is None:
-        console.print("[bold red]Error:[/bold red] Both patterns require configurations.")
+        console.print(
+            "[bold red]Error:[/bold red] Both patterns require configurations."
+        )
         raise typer.Exit(code=1)
     rec_a = _execute_pattern(
         pattern_name=pattern_a,

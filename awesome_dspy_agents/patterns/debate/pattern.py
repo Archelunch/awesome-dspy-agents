@@ -1,6 +1,6 @@
-from pathlib import Path
+from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Dict, List, Optional
+from pathlib import Path
 
 import dspy  # type: ignore
 
@@ -20,8 +20,12 @@ from awesome_dspy_agents.tools.registry import (
     set_current_iteration,
 )
 
-from .signatures import (AffirmativeDebater, JudgeDiscriminative,
-                         JudgeExtractive, NegativeDebater)
+from .signatures import (
+    AffirmativeDebater,
+    JudgeDiscriminative,
+    JudgeExtractive,
+    NegativeDebater,
+)
 
 llm_logger = get_logger("mad.llm", "llm_calls.log", max_bytes=2_000_000, backup_count=3)
 
@@ -32,7 +36,7 @@ class DebateExchange:
     affirmative_reasoning: str
     negative: str
     negative_reasoning: str
-    judge_eval: Optional[str] = None
+    judge_eval: str | None = None
 
 
 class DebaterModule(dspy.Module):
@@ -43,9 +47,9 @@ class DebaterModule(dspy.Module):
         role: str,
         debate_level: int = 2,
         persona: str = "",
-        lm: Optional[dspy.LM] = None,
+        lm: dspy.LM | None = None,
         module_type: str = "predict",
-        tool_names: Optional[List[str]] = None,
+        tool_names: list[str] | None = None,
         react_max_iters: int = 3,
     ):
         super().__init__()
@@ -135,10 +139,10 @@ class JudgeModule(dspy.Module):
 
     def __init__(
         self,
-        lm_discriminative: Optional[dspy.LM] = None,
-        lm_extractive: Optional[dspy.LM] = None,
+        lm_discriminative: dspy.LM | None = None,
+        lm_extractive: dspy.LM | None = None,
         module_type: str = "predict",
-        tool_names: Optional[List[str]] = None,
+        tool_names: list[str] | None = None,
         react_max_iters: int = 3,
     ):
         super().__init__()
@@ -207,18 +211,18 @@ class MADFramework(dspy.Module):
         adaptive_break: bool = True,
         affirmative_persona: str = "",
         negative_persona: str = "",
-        affirmative_lm: Optional[dspy.LM] = None,
-        negative_lm: Optional[dspy.LM] = None,
-        judge_lm_discriminative: Optional[dspy.LM] = None,
-        judge_lm_extractive: Optional[dspy.LM] = None,
+        affirmative_lm: dspy.LM | None = None,
+        negative_lm: dspy.LM | None = None,
+        judge_lm_discriminative: dspy.LM | None = None,
+        judge_lm_extractive: dspy.LM | None = None,
         affirmative_module_type: str = "predict",
         negative_module_type: str = "predict",
         judge_module_type: str = "predict",
-        affirmative_tools: Optional[List[str]] = None,
-        negative_tools: Optional[List[str]] = None,
+        affirmative_tools: list[str] | None = None,
+        negative_tools: list[str] | None = None,
         react_max_iters: int = 6,
-        judge_tool_names: Optional[List[str]] = None,
-        on_iteration: Optional[EmitIteration] = None,
+        judge_tool_names: list[str] | None = None,
+        on_iteration: EmitIteration | None = None,
     ):
         super().__init__()
 
@@ -255,7 +259,7 @@ class MADFramework(dspy.Module):
         )
 
     @staticmethod
-    def format_history(history: List[DebateExchange]) -> str:
+    def format_history(history: list[DebateExchange]) -> str:
         """Format debate history as readable text."""
         if not history:
             return "No debate history yet."
@@ -275,7 +279,7 @@ class MADFramework(dspy.Module):
         debate_topic: str,
     ):
         """Run complete debate process."""
-        history: List[DebateExchange] = []
+        history: list[DebateExchange] = []
         solution_found = False
         final_answer = None
 
@@ -308,7 +312,9 @@ class MADFramework(dspy.Module):
                 # Callback after initial exchange
                 if self.on_iteration is not None:
                     self.on_iteration(
-                        IterationEvent(iteration, exchange, self.format_history(history))
+                        IterationEvent(
+                            iteration, exchange, self.format_history(history)
+                        )
                     )
 
                 # Judge evaluates
@@ -380,12 +386,12 @@ class DebatePattern(AgentPattern):
             return readme.read_text(encoding="utf-8")
         return "Multi-Agent Debate pattern."
 
-    def default_config_path(self) -> Optional[Path]:
+    def default_config_path(self) -> Path | None:
         cfg = self._root / "config.yaml"
         return cfg if cfg.exists() else None
 
-    def available_configs(self) -> List[Path]:
-        configs: List[Path] = []
+    def available_configs(self) -> list[Path]:
+        configs: list[Path] = []
         # default
         cfg = self.default_config_path()
         if cfg:
@@ -397,7 +403,7 @@ class DebatePattern(AgentPattern):
                 configs.append(p)
         return configs
 
-    def available_tools(self) -> List[str]:
+    def available_tools(self) -> list[str]:
         # reflect from default config
         cfg_path = self.default_config_path()
         if cfg_path:
@@ -415,7 +421,7 @@ class DebatePattern(AgentPattern):
     def run(
         self,
         request: PatternRunRequest,
-        on_iteration: Optional[EmitIteration] = None,
+        on_iteration: EmitIteration | None = None,
     ) -> PatternOutcome:
 
         def execute(
@@ -434,9 +440,7 @@ class DebatePattern(AgentPattern):
                 affirmative_lm=(
                     build_lm(aff_cfg.lm) if aff_cfg and aff_cfg.lm else None
                 ),
-                negative_lm=(
-                    build_lm(neg_cfg.lm) if neg_cfg and neg_cfg.lm else None
-                ),
+                negative_lm=(build_lm(neg_cfg.lm) if neg_cfg and neg_cfg.lm else None),
                 judge_lm_discriminative=(
                     build_lm(cfg.judge.discriminative_lm)
                     if cfg.judge.discriminative_lm
@@ -447,9 +451,7 @@ class DebatePattern(AgentPattern):
                     if cfg.judge.extractive_lm
                     else None
                 ),
-                affirmative_module_type=(
-                    aff_cfg.module_type if aff_cfg else "predict"
-                ),
+                affirmative_module_type=(aff_cfg.module_type if aff_cfg else "predict"),
                 negative_module_type=(neg_cfg.module_type if neg_cfg else "predict"),
                 judge_module_type=cfg.judge.module_type,
                 affirmative_tools=(aff_cfg.tools if aff_cfg else []),

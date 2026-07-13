@@ -5,14 +5,14 @@ import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
 import structlog  # type: ignore
 
 _CONFIGURED: bool = False
 
 
-def configure_logging(pretty_console: Optional[bool] = None) -> None:
+def configure_logging(pretty_console: bool | None = None) -> None:
     """Configure structlog once for the entire application.
 
     - Pretty console by default when TTY or MAD_LOG_PRETTY is truthy.
@@ -26,7 +26,7 @@ def configure_logging(pretty_console: Optional[bool] = None) -> None:
         env_val = os.getenv("MAD_LOG_PRETTY", "1").lower()
         pretty_console = env_val not in ("0", "false", "no") and sys.stderr.isatty()
 
-    processors = [
+    processors: list[Any] = [
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.stdlib.add_log_level,
         structlog.processors.StackInfoRenderer(),
@@ -53,7 +53,7 @@ def get_logger(
     *,
     max_bytes: int = 2_000_000,
     backup_count: int = 3,
-    logs_dir: Optional[Path] = None,
+    logs_dir: Path | None = None,
 ):
     """Return a structlog logger and ensure a rotating file handler is attached.
 

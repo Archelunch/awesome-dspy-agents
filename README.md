@@ -296,6 +296,21 @@ Note: Early exit happens when subsequent additions stabilize. Default maximum it
 
 This section documents how to extend and maintain the CLI and pattern ecosystem.
 
+### Quality checks
+
+Install the development dependency group and run the same checks enforced in CI:
+
+```bash
+poetry install --with dev
+poetry run ruff check .
+poetry run ruff format --check .
+poetry run pyrefly check --summarize-errors
+poetry run pytest -q
+```
+
+Use `poetry run ruff check . --fix` and `poetry run ruff format .` to apply safe
+automatic lint and formatting fixes locally.
+
 ### Project layout
 
 ```

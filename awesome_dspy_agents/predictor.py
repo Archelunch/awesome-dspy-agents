@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-from typing import Any, Literal, Optional, Sequence, Union
+from collections.abc import Sequence
+from typing import Any, Literal, cast
 
 import dspy
 
 from awesome_dspy_agents.tools.registry import (
+    ToolProvider,
     reset_current_agent,
     runtime_tool_provider,
     set_current_agent,
-    ToolProvider,
 )
 
 PredictorKind = Literal["predict", "chain_of_thought", "react"]
-SignatureLike = Union[str, type[dspy.Signature]]
+SignatureLike = str | type[dspy.Signature]
 
 
 class PredictorModule(dspy.Module):
@@ -36,8 +37,8 @@ def build_predictor(
     kind: PredictorKind | str,
     *,
     role: str,
-    lm: Optional[dspy.LM] = None,
-    tool_names: Optional[Sequence[str]] = None,
+    lm: dspy.LM | None = None,
+    tool_names: Sequence[str] | None = None,
     tool_provider: ToolProvider = runtime_tool_provider,
     react_max_iters: int = 3,
 ) -> PredictorModule:
@@ -49,7 +50,11 @@ def build_predictor(
         predictor = dspy.ChainOfThought(signature)
     elif kind == "react":
         tools = tool_provider.build_dspy_tools(list(tool_names or []))
-        predictor = dspy.ReAct(signature, tools=tools, max_iters=react_max_iters)
+        # DSPy accepts string signatures and Tool instances at runtime, although
+        # its current annotations only describe signature classes and callables.
+        predictor = dspy.ReAct(
+            cast(Any, signature), tools=cast(Any, tools), max_iters=react_max_iters
+        )
     else:
         raise ValueError(f"Unsupported predictor kind: {kind}")
 

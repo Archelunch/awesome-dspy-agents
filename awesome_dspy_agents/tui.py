@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 from rich.console import Console  # type: ignore
 from rich.markdown import Markdown  # type: ignore
@@ -20,7 +20,7 @@ def render_header(pattern_name: str, topic: str) -> None:
     console.print(Panel.fit(Markdown(f"**Topic:** {topic}")))
 
 
-def render_iteration(iteration: int, exchange: Dict[str, Any]) -> None:
+def render_iteration(iteration: int, exchange: dict[str, Any]) -> None:
     if "judge_eval" in exchange:
         console.print(
             Panel.fit(
@@ -69,7 +69,7 @@ def render_iteration(iteration: int, exchange: Dict[str, Any]) -> None:
 
 
 def render_tool_events(
-    iteration: int, events: List[Dict[str, Any]], start_idx: int
+    iteration: int, events: list[dict[str, Any]], start_idx: int
 ) -> int:
     new_events = events[start_idx:]
     if not new_events:

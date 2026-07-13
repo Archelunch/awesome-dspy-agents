@@ -4,7 +4,9 @@ import os
 import tempfile
 import unittest
 
-os.environ.setdefault("DSPY_CACHEDIR", f"{tempfile.gettempdir()}/dspy-agents-test-cache")
+os.environ.setdefault(
+    "DSPY_CACHEDIR", f"{tempfile.gettempdir()}/dspy-agents-test-cache"
+)
 
 import dspy
 
@@ -42,7 +44,9 @@ class _Judge(dspy.Module):
 
 
 class WorkflowStateTests(unittest.TestCase):
-    def test_addition_by_subtraction_is_reusable_and_emits_typed_exchanges(self) -> None:
+    def test_addition_by_subtraction_is_reusable_and_emits_typed_exchanges(
+        self,
+    ) -> None:
         events = []
         framework = ABSFramework(max_iterations=1, on_iteration=events.append)
         framework.addition = _Addition()

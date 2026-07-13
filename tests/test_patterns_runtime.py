@@ -7,7 +7,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-os.environ.setdefault("DSPY_CACHEDIR", f"{tempfile.gettempdir()}/dspy-agents-test-cache")
+os.environ.setdefault(
+    "DSPY_CACHEDIR", f"{tempfile.gettempdir()}/dspy-agents-test-cache"
+)
 
 from awesome_dspy_agents.patterns.addition_by_subtraction.pattern import (
     AdditionBySubtractionPattern,
