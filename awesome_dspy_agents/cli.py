@@ -15,6 +15,11 @@ from rich.table import Table  # type: ignore
 
 from awesome_dspy_agents import __version__, tui
 from awesome_dspy_agents.evaluation import compare_answers
+from awesome_dspy_agents.mlflow_integration import (
+    MLflowConfig,
+    MLflowIntegrationError,
+    mlflow_run,
+)
 from awesome_dspy_agents.patterns.interface import discover_patterns
 from awesome_dspy_agents.runtime import (
     IterationEvent,
@@ -40,6 +45,7 @@ app = typer.Typer(
 console = Console()
 PATTERNS_DIR = Path(__file__).parent / "patterns"
 _allowed_paths: tuple[Path, ...] = ()
+_mlflow_config = MLflowConfig()
 
 
 def _pattern_map():
@@ -61,10 +67,40 @@ def _setup(
         "--allow-path",
         help="Allow file tools to access given absolute directories (repeatable)",
     ),
+    mlflow: bool = typer.Option(
+        False, "--mlflow", help="Enable MLflow experiment tracking and DSPy tracing"
+    ),
+    mlflow_tracking_uri: str | None = typer.Option(
+        None, "--mlflow-tracking-uri", envvar="MLFLOW_TRACKING_URI"
+    ),
+    mlflow_experiment: str = typer.Option(
+        "awesome-dspy-agents",
+        "--mlflow-experiment",
+        envvar="MLFLOW_EXPERIMENT_NAME",
+    ),
+    mlflow_run_name: str | None = typer.Option(None, "--mlflow-run-name"),
+    mlflow_tag: list[str] | None = typer.Option(
+        None, "--mlflow-tag", help="MLflow tag as KEY=VALUE (repeatable)"
+    ),
 ):
-    global _allowed_paths
+    global _allowed_paths, _mlflow_config
     _allowed_paths = tuple(
         Path(path).expanduser().resolve() for path in allow_path or []
+    )
+    tags: dict[str, str] = {}
+    for item in mlflow_tag or []:
+        if "=" not in item:
+            raise typer.BadParameter("must use KEY=VALUE", param_hint="--mlflow-tag")
+        key, value = item.split("=", 1)
+        if not key:
+            raise typer.BadParameter("key cannot be empty", param_hint="--mlflow-tag")
+        tags[key] = value
+    _mlflow_config = MLflowConfig(
+        enabled=mlflow,
+        tracking_uri=mlflow_tracking_uri,
+        experiment_name=mlflow_experiment,
+        run_name=mlflow_run_name,
+        tags=tags,
     )
 
 
@@ -135,32 +171,43 @@ def _execute_pattern(
         tui.render_header(pattern_name, topic)
 
     try:
-        outcome = pat.run(
-            PatternRunRequest(
-                topic=topic,
-                config_path=config_path,
-                overrides=overrides,
-                allowed_paths=_allowed_paths,
-                on_tool_event=_tool_listener,
-            ),
-            on_iteration=_on_iteration,
-        )
+        with mlflow_run(
+            _mlflow_config,
+            pattern=pattern_name,
+            topic=topic,
+            config_path=str(config_path),
+            version=__version__,
+        ) as tracking_run:
+            outcome = pat.run(
+                PatternRunRequest(
+                    topic=topic,
+                    config_path=config_path,
+                    overrides=overrides,
+                    allowed_paths=_allowed_paths,
+                    on_tool_event=_tool_listener,
+                ),
+                on_iteration=_on_iteration,
+            )
+            result = asdict(outcome)
+            record = {
+                "schema": 2,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "version": __version__,
+                "pattern": pattern_name,
+                "topic": topic,
+                "config_path": str(config_path),
+                "overrides": overrides,
+                "tool_events_by_iter": tool_events_by_iter,
+                "result": result,
+            }
+            if tracking_run is not None:
+                tracking_run.log_outcome(record)
+    except MLflowIntegrationError as e:
+        console.print(f"[bold red]MLflow error:[/bold red] {e}")
+        raise typer.Exit(code=1) from e
     except Exception as e:
         console.print(f"[bold red]Error during run:[/bold red] {e}")
         raise typer.Exit(code=1) from e
-
-    result = asdict(outcome)
-    record = {
-        "schema": 2,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "version": __version__,
-        "pattern": pattern_name,
-        "topic": topic,
-        "config_path": str(config_path),
-        "overrides": overrides,
-        "tool_events_by_iter": tool_events_by_iter,
-        "result": result,
-    }
 
     if save_path is not None:
         try:

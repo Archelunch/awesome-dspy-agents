@@ -31,6 +31,11 @@ A collection of multi-agent systems implemented with the [DSPy](https://github.c
    poetry install
    ```
 
+   To include optional MLflow observability:
+   ```bash
+   poetry install -E mlflow
+   ```
+
 4. **Set up environment variables:**
    Set your API keys for the language model providers you want to use:
    ```bash
@@ -176,6 +181,27 @@ poetry run dspy-agents run addition_by_subtraction "Summarize file" --allow-path
 ```
 
 During runs you will see per-iteration exchanges (debate or addition/subtraction), optional judge evaluations, and a final decision. Tool usage is summarized under each iteration.
+
+### MLflow observability
+
+Install the `mlflow` extra, then add the global `--mlflow` flag before the command.
+MLflow's DSPy autologging captures module and language-model traces; the integration also
+records the pattern, topic, configuration path, outcome metrics, tags, and `session.json`.
+
+```bash
+poetry install -E mlflow
+poetry run dspy-agents \
+  --mlflow \
+  --mlflow-tracking-uri http://localhost:5000 \
+  --mlflow-experiment agent-patterns \
+  --mlflow-run-name debate-rlhf \
+  --mlflow-tag environment=local \
+  run debate "Is RLHF always beneficial?"
+```
+
+`--mlflow-tracking-uri` and `--mlflow-experiment` also read `MLFLOW_TRACKING_URI`
+and `MLFLOW_EXPERIMENT_NAME`. Without a tracking URI, MLflow uses its configured
+default store. Start a local UI with `mlflow ui`, then open `http://localhost:5000`.
 
 ## Configuration
 
@@ -416,7 +442,7 @@ Guidelines:
 - [x] Add tools
 - [ ] Add MAPS pattern
 - [x] Versioned evaluation datasets, metrics, and optimizer seam
-- [ ] Integration with MLFlow
+- [x] Integration with MLflow
 - [x] Evaluation profiles for token counts, cost, and latency
 - [ ] Batch runs (`run-batch --topics file.txt --concurrency N`).
 - [x] Add deterministic tests

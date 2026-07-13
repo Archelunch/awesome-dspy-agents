@@ -19,6 +19,9 @@ dependencies = [
     "attachments (>=0.25.1,<0.26.0)"
 ]
 
+[project.optional-dependencies]
+mlflow = ["mlflow>=3.1,<4.0"]
+
 
 [project.scripts]
 dspy-agents = "awesome_dspy_agents.cli:app"
