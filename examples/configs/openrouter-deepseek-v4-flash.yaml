@@ -1,0 +1,50 @@
+# Shared OpenRouter profile for both built-in Patterns.
+#
+# Usage:
+#   export OPENROUTER_API_KEY="sk-or-v1-..."
+#   poetry run dspy-agents run addition_by_subtraction \
+#     --config examples/configs/openrouter-deepseek-v4-flash.yaml \
+#     "Explain why evaluation datasets should be versioned."
+
+default_lm:
+  provider: openai
+  model: deepseek/deepseek-v4-flash
+  api_base: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY
+  temperature: 0.4
+  top_p: 1.0
+  max_tokens: 4000
+
+agents:
+  affirmative:
+    persona: "Argue for the proposal with concrete evidence and practical examples."
+    module_type: react
+    tools: ["math_eval", "word_count"]
+
+  negative:
+    persona: "Challenge assumptions, identify failure modes, and propose corrections."
+    module_type: react
+    tools: ["math_eval", "word_count"]
+
+  addition:
+    persona: "Expand the response with relevant details, evidence, and examples."
+    module_type: react
+    tools: ["math_eval", "word_count"]
+
+  subtraction:
+    persona: "Remove redundancy and return a concise, accurate refinement."
+    module_type: react
+    tools: ["math_eval", "word_count"]
+
+judge:
+  module_type: react
+  tools: ["math_eval", "word_count"]
+
+debate:
+  max_iterations: 2
+  debate_level: 2
+  adaptive_break: true
+
+abs:
+  max_iterations: 2
+  early_exit: true

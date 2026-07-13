@@ -240,6 +240,7 @@ abs:
 Tips:
 
 - Point to a custom config: `-c path/to/config.yaml`.
+- OpenRouter DeepSeek profile: `examples/configs/openrouter-deepseek-v4-flash.yaml`.
 - Override nested values at runtime (typed): `--set debate.max_iterations=3 --set judge.module_type=react`.
 - Per‑agent LM: set `agents.<name>.lm` block with `provider/model/api_base/api_key(_env)`.
 - File tools are sandboxed; add `--allow-path /abs/dir` to enable local file access.
