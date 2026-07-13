@@ -8,13 +8,17 @@ import inspect
 import logging
 import math
 import operator
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Protocol, Sequence
+from typing import (
+    Any,
+    Protocol,
+)
 
 import dspy
 from attachments.dspy import Attachments  # type: ignore
@@ -72,7 +76,7 @@ class FileAccessPolicy:
     roots: tuple[Path, ...] = ()
 
     @classmethod
-    def from_paths(cls, roots: Sequence[Path | str]) -> "FileAccessPolicy":
+    def from_paths(cls, roots: Sequence[Path | str]) -> FileAccessPolicy:
         return cls(tuple(Path(root).expanduser().resolve() for root in roots))
 
     def allows(self, path: Path | str) -> bool:
@@ -80,7 +84,9 @@ class FileAccessPolicy:
             return False
         try:
             resolved = Path(path).expanduser().resolve()
-            return any(resolved == root or resolved.is_relative_to(root) for root in self.roots)
+            return any(
+                resolved == root or resolved.is_relative_to(root) for root in self.roots
+            )
         except (OSError, RuntimeError):
             return False
 
@@ -97,7 +103,7 @@ ToolFactory = Callable[[FileAccessPolicy], Callable[..., Any]]
 class ToolCatalog:
     """Immutable-by-convention catalog of named tool factories."""
 
-    def __init__(self, definitions: Optional[Mapping[str, ToolFactory]] = None) -> None:
+    def __init__(self, definitions: Mapping[str, ToolFactory] | None = None) -> None:
         self._definitions = dict(definitions or {})
 
     def register(self, name: str, factory: ToolFactory) -> None:
@@ -111,7 +117,7 @@ class ToolCatalog:
         except KeyError as error:
             raise KeyError(f"Unknown tool '{name}'") from error
 
-    def names(self) -> List[str]:
+    def names(self) -> list[str]:
         return sorted(self._definitions)
 
 
@@ -122,7 +128,7 @@ class ToolExecutor:
         self,
         catalog: ToolCatalog,
         policy: FileAccessPolicy,
-        listener: Optional[ToolListener] = None,
+        listener: ToolListener | None = None,
     ) -> None:
         self.catalog = catalog
         self.policy = policy
@@ -131,7 +137,7 @@ class ToolExecutor:
     def get(self, name: str) -> Callable[..., Any]:
         return self._instrument(name, self.catalog.build(name, self.policy))
 
-    def build_dspy_tools(self, names: List[str]) -> List[dspy.Tool]:
+    def build_dspy_tools(self, names: list[str]) -> list[dspy.Tool]:
         return [dspy.Tool(self.get(name)) for name in names]
 
     def _emit(self, event: ToolEvent) -> None:
@@ -142,7 +148,9 @@ class ToolExecutor:
         except Exception as error:
             logger.warning("Tool listener failed for %s: %s", event.tool, error)
 
-    def _instrument(self, name: str, function: Callable[..., Any]) -> Callable[..., Any]:
+    def _instrument(
+        self, name: str, function: Callable[..., Any]
+    ) -> Callable[..., Any]:
         @wraps(function)
         def wrapped(*args: Any, **kwargs: Any) -> Any:
             agent = get_current_agent()
@@ -151,20 +159,26 @@ class ToolExecutor:
                 "args_preview": str(args)[:200],
                 "kwargs_preview": str(kwargs)[:200],
             }
-            tools_logger.info("tool_call", tool=name, agent=agent, iteration=iteration, **call_details)
+            tools_logger.info(
+                "tool_call", tool=name, agent=agent, iteration=iteration, **call_details
+            )
             self._emit(ToolEvent("tool_call", name, agent, iteration, call_details))
             try:
                 result = function(*args, **kwargs)
             except Exception as error:
                 details = {"error": str(error)}
-                tools_logger.info("tool_error", tool=name, agent=agent, iteration=iteration, **details)
+                tools_logger.info(
+                    "tool_error", tool=name, agent=agent, iteration=iteration, **details
+                )
                 self._emit(ToolEvent("tool_error", name, agent, iteration, details))
                 raise
             details = {
                 "result_type": type(result).__name__,
                 "size": len(result) if isinstance(result, str) else None,
             }
-            tools_logger.info("tool_result", tool=name, agent=agent, iteration=iteration, **details)
+            tools_logger.info(
+                "tool_result", tool=name, agent=agent, iteration=iteration, **details
+            )
             self._emit(ToolEvent("tool_result", name, agent, iteration, details))
             return result
 
@@ -173,10 +187,10 @@ class ToolExecutor:
 
 
 class ToolProvider(Protocol):
-    def build_dspy_tools(self, names: List[str]) -> List[dspy.Tool]: ...
+    def build_dspy_tools(self, names: list[str]) -> list[dspy.Tool]: ...
 
 
-_current_executor: ContextVar[Optional[ToolExecutor]] = ContextVar(
+_current_executor: ContextVar[ToolExecutor | None] = ContextVar(
     "dspy_agents_tool_executor", default=None
 )
 
@@ -191,7 +205,7 @@ def tool_executor_scope(executor: ToolExecutor) -> Iterator[None]:
 
 
 class RuntimeToolProvider:
-    def build_dspy_tools(self, names: List[str]) -> List[dspy.Tool]:
+    def build_dspy_tools(self, names: list[str]) -> list[dspy.Tool]:
         executor = _current_executor.get()
         if executor is None:
             raise RuntimeError("Tools must be built inside a Pattern run")
@@ -201,7 +215,7 @@ class RuntimeToolProvider:
 runtime_tool_provider = RuntimeToolProvider()
 
 
-_BINARY_OPERATORS: Dict[type[ast.operator], Callable[[Any, Any], Any]] = {
+_BINARY_OPERATORS: dict[type[ast.operator], Callable[[Any, Any], Any]] = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
     ast.Mult: operator.mul,
@@ -210,7 +224,7 @@ _BINARY_OPERATORS: Dict[type[ast.operator], Callable[[Any, Any], Any]] = {
     ast.Mod: operator.mod,
     ast.Pow: operator.pow,
 }
-_UNARY_OPERATORS: Dict[type[ast.unaryop], Callable[[Any], Any]] = {
+_UNARY_OPERATORS: dict[type[ast.unaryop], Callable[[Any], Any]] = {
     ast.UAdd: operator.pos,
     ast.USub: operator.neg,
 }
@@ -244,7 +258,11 @@ def _require_bounded_operation(
 def _evaluate_arithmetic(node: ast.AST) -> int | float:
     if isinstance(node, ast.Expression):
         return _evaluate_arithmetic(node.body)
-    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+    if (
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, (int, float))
+        and not isinstance(node.value, bool)
+    ):
         return _require_bounded_number(node.value)
     if isinstance(node, ast.BinOp) and type(node.op) in _BINARY_OPERATORS:
         left = _evaluate_arithmetic(node.left)

@@ -1,0 +1,23 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: snok/install-poetry@v1
+        with:
+          version: "2.3.2"
+      - run: poetry install --with dev
+      - run: poetry run ruff check .
+      - run: poetry run ruff format --check .
+      - run: poetry run pyrefly check --summarize-errors
+      - run: poetry run pytest -q

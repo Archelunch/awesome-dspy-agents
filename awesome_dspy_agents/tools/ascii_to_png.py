@@ -9,7 +9,6 @@ It uses PIL (Pillow) to render text with monospace fonts and save as image files
 
 import os
 from pathlib import Path
-from typing import Optional, Tuple, Union
 
 from PIL import Image, ImageDraw, ImageFont  # type: ignore
 
@@ -25,11 +24,11 @@ class AsciiToPngConverter:
     def __init__(
         self,
         font_size: int = 16,
-        background_color: Tuple[int, int, int] = (255, 255, 255),
-        text_color: Tuple[int, int, int] = (0, 0, 0),
+        background_color: tuple[int, int, int] = (255, 255, 255),
+        text_color: tuple[int, int, int] = (0, 0, 0),
         padding: int = 20,
-        char_width: Optional[int] = None,
-        char_height: Optional[int] = None,
+        char_width: int | None = None,
+        char_height: int | None = None,
     ):
         """
         Initialize the ASCII to PNG converter.
@@ -52,7 +51,7 @@ class AsciiToPngConverter:
         self.font = self._load_font()
         self._calculate_char_dimensions()
 
-    def _load_font(self) -> ImageFont.ImageFont:
+    def _load_font(self) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
         """
         Load a monospace font for proper ASCII art rendering.
 
@@ -93,10 +92,10 @@ class AsciiToPngConverter:
         """
         # Use 'M' as it's typically the widest character in monospace fonts
         bbox = self.font.getbbox("M")
-        self.char_width = bbox[2] - bbox[0]
-        self.char_height = bbox[3] - bbox[1]
+        self.char_width = int(bbox[2] - bbox[0])
+        self.char_height = int(bbox[3] - bbox[1])
 
-    def _calculate_text_dimensions(self, text: str) -> Tuple[int, int]:
+    def _calculate_text_dimensions(self, text: str) -> tuple[int, int]:
         """
         Calculate the dimensions needed to render the given text.
 
@@ -121,8 +120,8 @@ class AsciiToPngConverter:
         self,
         ascii_text: str,
         output_path: str,
-        image_width: Optional[int] = None,
-        image_height: Optional[int] = None,
+        image_width: int | None = None,
+        image_height: int | None = None,
     ) -> str:
         """
         Convert ASCII text to a PNG image.
@@ -178,8 +177,8 @@ class AsciiToPngConverter:
 
     def convert_file_to_png(
         self,
-        input_file: Union[str, Path],
-        output_file: Optional[Union[str, Path]] = None,
+        input_file: str | Path,
+        output_file: str | Path | None = None,
     ) -> str:
         """
         Convert an ASCII art file to a PNG image.
@@ -195,7 +194,7 @@ class AsciiToPngConverter:
         input_path = Path(input_file)
 
         # Read the ASCII text
-        with open(input_path, "r", encoding="utf-8") as f:
+        with open(input_path, encoding="utf-8") as f:
             ascii_text = f.read()
 
         # Determine output path
@@ -206,8 +205,8 @@ class AsciiToPngConverter:
 
     def batch_convert_directory(
         self,
-        input_dir: Union[str, Path],
-        output_dir: Optional[Union[str, Path]] = None,
+        input_dir: str | Path,
+        output_dir: str | Path | None = None,
         file_pattern: str = "*.txt",
     ) -> list:
         """
@@ -246,8 +245,8 @@ class AsciiToPngConverter:
         ascii_text: str,
         output_path: str,
         scale_factor: int = 2,
-        image_width: Optional[int] = None,
-        image_height: Optional[int] = None,
+        image_width: int | None = None,
+        image_height: int | None = None,
     ) -> str:
         """
         Convert ASCII text to a high-quality PNG image with scaling.
@@ -309,8 +308,8 @@ class AsciiToPngConverter:
         self,
         ascii_text: str,
         scale_factor: int = 3,
-        image_width: Optional[int] = None,
-        image_height: Optional[int] = None,
+        image_width: int | None = None,
+        image_height: int | None = None,
     ) -> Image.Image:
         """
         Convert ASCII text to a high-quality PIL Image in memory without saving to disk.
@@ -404,8 +403,8 @@ def create_png_from_ascii(
     ascii_text: str,
     output_path: str,
     font_size: int = 16,
-    background_color: Tuple[int, int, int] = (255, 255, 255),
-    text_color: Tuple[int, int, int] = (0, 0, 0),
+    background_color: tuple[int, int, int] = (255, 255, 255),
+    text_color: tuple[int, int, int] = (0, 0, 0),
     high_quality: bool = False,
     scale_factor: int = 2,
 ) -> str:

@@ -4,7 +4,9 @@ import os
 import tempfile
 import unittest
 
-os.environ.setdefault("DSPY_CACHEDIR", f"{tempfile.gettempdir()}/dspy-agents-test-cache")
+os.environ.setdefault(
+    "DSPY_CACHEDIR", f"{tempfile.gettempdir()}/dspy-agents-test-cache"
+)
 
 import dspy
 
@@ -53,9 +55,7 @@ class PredictorConstructionTests(unittest.TestCase):
     def test_assigns_language_model_to_nested_predictors(self) -> None:
         lm = object()
 
-        predictor = build_predictor(
-            "question -> answer", "predict", role="test", lm=lm
-        )
+        predictor = build_predictor("question -> answer", "predict", role="test", lm=lm)
 
         self.assertTrue(predictor.predictors())
         self.assertTrue(all(item.lm is lm for item in predictor.predictors()))

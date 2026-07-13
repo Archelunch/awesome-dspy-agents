@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Protocol
+from typing import Protocol
 
 from awesome_dspy_agents.runtime import EmitIteration, PatternOutcome, PatternRunRequest
 
@@ -16,7 +17,7 @@ class AgentPattern(Protocol):
         """Return a short Markdown description of the pattern."""
         ...
 
-    def default_config_path(self) -> Optional[Path]:
+    def default_config_path(self) -> Path | None:
         """Return the default config.yaml path for this pattern, if any."""
         ...
 
@@ -31,7 +32,7 @@ class AgentPattern(Protocol):
     def run(
         self,
         request: PatternRunRequest,
-        on_iteration: Optional[EmitIteration] = None,
+        on_iteration: EmitIteration | None = None,
     ) -> PatternOutcome:
         """Execute one Pattern run."""
         ...
@@ -45,13 +46,13 @@ class DiscoveryIssue:
 
 @dataclass(frozen=True)
 class PatternCatalog:
-    patterns: Dict[str, AgentPattern] = field(default_factory=dict)
+    patterns: dict[str, AgentPattern] = field(default_factory=dict)
     issues: tuple[DiscoveryIssue, ...] = ()
 
 
 def discover_patterns(root: Path) -> PatternCatalog:
     """Discover Pattern adapters and retain every discovery failure."""
-    patterns: Dict[str, AgentPattern] = {}
+    patterns: dict[str, AgentPattern] = {}
     issues = []
     for entry in root.iterdir():
         if not entry.is_dir():
@@ -81,5 +82,7 @@ def discover_patterns(root: Path) -> PatternCatalog:
                 continue
             patterns[pattern.name] = pattern
         except Exception as error:
-            issues.append(DiscoveryIssue(entry.name, f"{type(error).__name__}: {error}"))
+            issues.append(
+                DiscoveryIssue(entry.name, f"{type(error).__name__}: {error}")
+            )
     return PatternCatalog(patterns, tuple(issues))

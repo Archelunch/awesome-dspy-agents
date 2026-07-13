@@ -1,6 +1,6 @@
-from pathlib import Path
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from pathlib import Path
 
 import dspy  # type: ignore
 
@@ -37,9 +37,9 @@ class AdditionModule(dspy.Module):
     def __init__(
         self,
         persona: str = "",
-        lm: Optional[dspy.LM] = None,
+        lm: dspy.LM | None = None,
         module_type: str = "predict",
-        tool_names: Optional[List[str]] = None,
+        tool_names: list[str] | None = None,
         react_max_iters: int = 3,
     ):
         super().__init__()
@@ -75,9 +75,9 @@ class SubtractionModule(dspy.Module):
     def __init__(
         self,
         persona: str = "",
-        lm: Optional[dspy.LM] = None,
+        lm: dspy.LM | None = None,
         module_type: str = "predict",
-        tool_names: Optional[List[str]] = None,
+        tool_names: list[str] | None = None,
         react_max_iters: int = 3,
     ):
         super().__init__()
@@ -121,14 +121,14 @@ class ABSFramework(dspy.Module):
         early_exit: bool = True,
         addition_persona: str = "",
         subtraction_persona: str = "",
-        addition_lm: Optional[dspy.LM] = None,
-        subtraction_lm: Optional[dspy.LM] = None,
+        addition_lm: dspy.LM | None = None,
+        subtraction_lm: dspy.LM | None = None,
         addition_module_type: str = "predict",
         subtraction_module_type: str = "predict",
-        addition_tools: Optional[List[str]] = None,
-        subtraction_tools: Optional[List[str]] = None,
+        addition_tools: list[str] | None = None,
+        subtraction_tools: list[str] | None = None,
         react_max_iters: int = 6,
-        on_iteration: Optional[EmitIteration] = None,
+        on_iteration: EmitIteration | None = None,
     ):
         super().__init__()
         self.max_iterations = max_iterations
@@ -151,7 +151,7 @@ class ABSFramework(dspy.Module):
         )
 
     @staticmethod
-    def format_history(history: List[AdditionBySubtractionExchange]) -> str:
+    def format_history(history: list[AdditionBySubtractionExchange]) -> str:
         if not history:
             return "No conversation yet."
         formatted = []
@@ -163,13 +163,13 @@ class ABSFramework(dspy.Module):
         return "\n".join(formatted)
 
     def forward(self, context: str, instruction: str):
-        history: List[AdditionBySubtractionExchange] = []
+        history: list[AdditionBySubtractionExchange] = []
         final_response = ""
 
         H_context = context
         H_instruction = instruction
 
-        previous_refined_response: Optional[str] = None
+        previous_refined_response: str | None = None
         for iteration in range(1, self.max_iterations + 1):
             hist_str = self.format_history(history)
             iter_token = set_current_iteration(iteration)
@@ -198,7 +198,9 @@ class ABSFramework(dspy.Module):
                 # callback for TUI
                 if self.on_iteration is not None:
                     self.on_iteration(
-                        IterationEvent(iteration, exchange, self.format_history(history))
+                        IterationEvent(
+                            iteration, exchange, self.format_history(history)
+                        )
                     )
 
                 # Early exit if no changes
@@ -242,12 +244,12 @@ class AdditionBySubtractionPattern(AgentPattern):
             return readme.read_text(encoding="utf-8")
         return "Addition-by-Subtraction collaboration pattern."
 
-    def default_config_path(self) -> Optional[Path]:
+    def default_config_path(self) -> Path | None:
         cfg = self._root / "config.yaml"
         return cfg if cfg.exists() else None
 
-    def available_configs(self) -> List[Path]:
-        configs: List[Path] = []
+    def available_configs(self) -> list[Path]:
+        configs: list[Path] = []
         cfg = self.default_config_path()
         if cfg:
             configs.append(cfg)
@@ -257,7 +259,7 @@ class AdditionBySubtractionPattern(AgentPattern):
                 configs.append(p)
         return configs
 
-    def available_tools(self) -> List[str]:
+    def available_tools(self) -> list[str]:
         cfg_path = self.default_config_path()
         if cfg_path:
             cfg = load_config(str(cfg_path))
@@ -274,7 +276,7 @@ class AdditionBySubtractionPattern(AgentPattern):
     def run(
         self,
         request: PatternRunRequest,
-        on_iteration: Optional[EmitIteration] = None,
+        on_iteration: EmitIteration | None = None,
     ) -> PatternOutcome:
 
         def execute(
@@ -289,18 +291,12 @@ class AdditionBySubtractionPattern(AgentPattern):
                 early_exit=cfg.abs.early_exit,
                 addition_persona=(add_cfg.persona if add_cfg else ""),
                 subtraction_persona=(sub_cfg.persona if sub_cfg else ""),
-                addition_lm=(
-                    build_lm(add_cfg.lm) if add_cfg and add_cfg.lm else None
-                ),
+                addition_lm=(build_lm(add_cfg.lm) if add_cfg and add_cfg.lm else None),
                 subtraction_lm=(
                     build_lm(sub_cfg.lm) if sub_cfg and sub_cfg.lm else None
                 ),
-                addition_module_type=(
-                    add_cfg.module_type if add_cfg else "predict"
-                ),
-                subtraction_module_type=(
-                    sub_cfg.module_type if sub_cfg else "predict"
-                ),
+                addition_module_type=(add_cfg.module_type if add_cfg else "predict"),
+                subtraction_module_type=(sub_cfg.module_type if sub_cfg else "predict"),
                 addition_tools=(add_cfg.tools if add_cfg else []),
                 subtraction_tools=(sub_cfg.tools if sub_cfg else []),
                 on_iteration=emit,

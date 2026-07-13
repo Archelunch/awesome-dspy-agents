@@ -32,3 +32,24 @@ packages = [
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "ruff (>=0.15.21,<0.16.0)",
+    "pyrefly (>=1.1.1,<2.0.0)",
+    "pytest (>=9.1.1,<10.0.0)",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "UP", "RUF"]
+# Typer intentionally uses Option and Argument calls as declarative defaults.
+ignore = ["B008"]
+
+[tool.pyrefly]
+project-includes = ["awesome_dspy_agents"]
+project-excludes = [".venv"]
+python-version = "3.12.0"

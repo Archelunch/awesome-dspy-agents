@@ -22,7 +22,9 @@ class PatternDiscoveryTests(unittest.TestCase):
     def test_import_failure_is_returned_as_a_typed_issue(self) -> None:
         root = self.make_pattern_directory("broken")
 
-        with patch("builtins.__import__", side_effect=ImportError("missing dependency")):
+        with patch(
+            "builtins.__import__", side_effect=ImportError("missing dependency")
+        ):
             catalog = discover_patterns(root)
 
         self.assertEqual(catalog.patterns, {})

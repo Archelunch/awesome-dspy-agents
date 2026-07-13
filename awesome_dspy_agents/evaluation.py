@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence
+from typing import Any, Protocol
 
 import dspy
 
@@ -27,7 +28,7 @@ class EvaluationDataset:
     examples: tuple[EvaluationExample, ...]
 
     @classmethod
-    def load(cls, path: Path) -> "EvaluationDataset":
+    def load(cls, path: Path) -> EvaluationDataset:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data.get("version"), int) or data["version"] < 1:
             raise ValueError("Evaluation dataset version must be a positive integer")
@@ -43,7 +44,7 @@ class EvaluationDataset:
             raise ValueError("Evaluation dataset must contain at least one example")
         return cls(name=data["name"], version=data["version"], examples=examples)
 
-    def to_dspy(self) -> List[dspy.Example]:
+    def to_dspy(self) -> list[dspy.Example]:
         return [example.to_dspy() for example in self.examples]
 
 
@@ -55,7 +56,9 @@ def exact_answer(example: dspy.Example, prediction: dspy.Prediction) -> bool:
 
 
 def normalized_answer(example: dspy.Example, prediction: dspy.Prediction) -> bool:
-    normalize = lambda value: " ".join(str(value).lower().split())
+    def normalize(value: object) -> str:
+        return " ".join(str(value).lower().split())
+
     return normalize(prediction.answer) == normalize(example.answer)
 
 
@@ -112,7 +115,9 @@ def _history_usage(history: Sequence[Mapping[str, Any]]) -> UsageSummary:
     for item in history:
         cost += float(item.get("cost") or 0.0)
         usage = item.get("usage") or {}
-        input_tokens += int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        input_tokens += int(
+            usage.get("prompt_tokens") or usage.get("input_tokens") or 0
+        )
         output_tokens += int(
             usage.get("completion_tokens") or usage.get("output_tokens") or 0
         )
@@ -161,7 +166,7 @@ class EvaluationRunner:
 
 class Optimizer(Protocol):
     def compile(
-        self, student: dspy.Module, *, trainset: List[dspy.Example], **kwargs: Any
+        self, student: dspy.Module, *, trainset: list[dspy.Example], **kwargs: Any
     ) -> dspy.Module: ...
 
 

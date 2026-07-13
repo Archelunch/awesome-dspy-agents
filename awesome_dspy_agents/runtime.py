@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any
 
 import dspy
 
 from awesome_dspy_agents.config import AppConfig, build_lm, load_config
 from awesome_dspy_agents.tools.registry import (
     FileAccessPolicy,
-    ToolListener,
     ToolExecutor,
+    ToolListener,
     default_catalog,
     tool_executor_scope,
 )
@@ -26,7 +27,7 @@ class PatternRunRequest:
     config_path: Path
     overrides: Mapping[str, Any] = field(default_factory=dict)
     allowed_paths: tuple[Path, ...] = ()
-    on_tool_event: Optional[ToolListener] = None
+    on_tool_event: ToolListener | None = None
 
 
 @dataclass(frozen=True)
@@ -44,7 +45,7 @@ class RuntimeIssue:
 
     kind: str
     message: str
-    iteration: Optional[int] = None
+    iteration: int | None = None
 
 
 @dataclass(frozen=True)
@@ -55,16 +56,17 @@ class PatternOutcome:
     justification: str
     iterations_used: int
     stopped_early: bool
-    history: List[Any]
-    issues: List[RuntimeIssue] = field(default_factory=list)
+    history: list[Any]
+    issues: list[RuntimeIssue] = field(default_factory=list)
 
 
-def exchange_to_dict(exchange: Any) -> Dict[str, Any]:
+def exchange_to_dict(exchange: Any) -> dict[str, Any]:
     if is_dataclass(exchange) and not isinstance(exchange, type):
         return asdict(exchange)
     if isinstance(exchange, Mapping):
         return dict(exchange)
     raise TypeError(f"Unsupported exchange type: {type(exchange).__name__}")
+
 
 EmitIteration = Callable[[IterationEvent], None]
 ExecutePattern = Callable[[PatternRunRequest, EmitIteration], PatternOutcome]
@@ -83,10 +85,10 @@ class PatternRuntime:
         request: PatternRunRequest,
         *,
         execute: ExecutePattern,
-        on_iteration: Optional[EmitIteration] = None,
-        lm: Optional[Any] = None,
+        on_iteration: EmitIteration | None = None,
+        lm: Any | None = None,
     ) -> PatternOutcome:
-        issues: List[RuntimeIssue] = []
+        issues: list[RuntimeIssue] = []
 
         def emit(event: IterationEvent) -> None:
             if on_iteration is not None:
@@ -121,8 +123,8 @@ class PatternRuntime:
         request: PatternRunRequest,
         *,
         execute: ExecuteConfiguredPattern,
-        on_iteration: Optional[EmitIteration] = None,
-        base_config_path: Optional[Path] = None,
+        on_iteration: EmitIteration | None = None,
+        base_config_path: Path | None = None,
     ) -> PatternOutcome:
         """Validate configuration, scope its default LM, and execute a Pattern."""
 

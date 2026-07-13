@@ -5,7 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-os.environ.setdefault("DSPY_CACHEDIR", f"{tempfile.gettempdir()}/dspy-agents-test-cache")
+os.environ.setdefault(
+    "DSPY_CACHEDIR", f"{tempfile.gettempdir()}/dspy-agents-test-cache"
+)
 
 from awesome_dspy_agents.tools.registry import (
     FileAccessPolicy,

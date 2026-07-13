@@ -6,7 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-os.environ.setdefault("DSPY_CACHEDIR", f"{tempfile.gettempdir()}/dspy-agents-test-cache")
+os.environ.setdefault(
+    "DSPY_CACHEDIR", f"{tempfile.gettempdir()}/dspy-agents-test-cache"
+)
 
 import dspy
 
@@ -59,7 +61,9 @@ class EvaluationTests(unittest.TestCase):
     def test_dataset_loader_rejects_unversioned_data(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "dataset.json"
-            path.write_text(json.dumps({"name": "bad", "examples": []}), encoding="utf-8")
+            path.write_text(
+                json.dumps({"name": "bad", "examples": []}), encoding="utf-8"
+            )
 
             with self.assertRaisesRegex(ValueError, "version"):
                 EvaluationDataset.load(path)
