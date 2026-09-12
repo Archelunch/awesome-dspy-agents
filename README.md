@@ -41,6 +41,7 @@ A collection of multi-agent systems implemented with the [DSPy](https://github.c
    ```bash
    export GEMINI_API_KEY=your_gemini_api_key_here
    export OPENAI_API_KEY=your_openai_api_key_here
+- [Ivy Tendril](https://github.com/Ivy-Interactive/Ivy-Tendril) - Open-source agentic software factory with an amazing UI that handles parallel Git worktrees for you, complete with programmatic verifications and fast review loops
    # Add other provider keys as needed
    ```
 
